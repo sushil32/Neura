@@ -18,13 +18,12 @@ from app.schemas.video import (
     VideoResponse,
     VideoUpdate,
 )
+from app.utils.credits import CreditManager, get_credit_manager
 from app.utils.deps import RequireCredits, get_current_active_user
+from app.workers.tasks import video_generation_task
 
 router = APIRouter()
 logger = structlog.get_logger()
-
-# Cost estimation
-VIDEO_CREDITS_PER_MINUTE = 10
 
 
 @router.post("", response_model=VideoResponse, status_code=status.HTTP_201_CREATED)
@@ -163,7 +162,7 @@ async def delete_video(
 async def generate_video(
     video_id: UUID,
     data: VideoGenerateRequest,
-    user: User = Depends(RequireCredits(VIDEO_CREDITS_PER_MINUTE)),
+    user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> VideoGenerateResponse:
     """Start video generation."""
@@ -190,10 +189,28 @@ async def generate_video(
             detail="Script is required for video generation",
         )
     
-    # Estimate credits (rough estimate based on script length)
-    words = len(video.script.split())
-    estimated_duration = words // 2  # ~120 words per minute
-    estimated_credits = max(VIDEO_CREDITS_PER_MINUTE, estimated_duration * VIDEO_CREDITS_PER_MINUTE // 60)
+    # Estimate credits using CreditManager
+    estimated_credits = CreditManager.estimate_video_credits(
+        script_length=len(video.script),
+        resolution=data.resolution,
+    )
+    
+    # Check credits
+    if user.credits < estimated_credits:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Insufficient credits. Required: {estimated_credits}, Available: {user.credits}",
+        )
+    
+    # Check plan limits
+    plan_limits = CreditManager.get_plan_limits(user.plan)
+    estimated_duration = len(video.script) / 15  # ~15 chars per second
+    
+    if estimated_duration > plan_limits.get("max_video_length", 60):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Video too long for {user.plan} plan. Max: {plan_limits['max_video_length']}s",
+        )
     
     # Create job
     job = Job(
@@ -204,31 +221,44 @@ async def generate_video(
             "video_id": str(video.id),
             "quality": data.quality,
             "resolution": data.resolution,
+            "voice_id": data.voice_id,
+            "avatar_id": data.avatar_id,
         },
         credits_estimated=estimated_credits,
     )
     db.add(job)
     await db.flush()
     
-    # Update video status
+    # Update video with settings
     video.status = "queued"
     video.resolution = data.resolution
+    if data.voice_id:
+        video.voice_id = data.voice_id
+    if data.avatar_id:
+        video.avatar_id = data.avatar_id
     
-    # TODO: Queue Celery task for video generation
-    # task = generate_video_task.delay(str(job.id))
-    # job.celery_task_id = task.id
+    await db.commit()
     
-    logger.info(
-        "Video generation queued",
-        video_id=str(video.id),
-        job_id=str(job.id),
-    )
+    # Queue Celery task for video generation
+    try:
+        task = video_generation_task.delay(str(job.id))
+        job.celery_task_id = task.id
+        await db.commit()
+        logger.info(
+            "Video generation task queued",
+            video_id=str(video.id),
+            job_id=str(job.id),
+            task_id=task.id,
+        )
+    except Exception as e:
+        logger.error("Failed to queue Celery task", error=str(e))
+        # Still return success - task will be picked up by beat scheduler
     
     return VideoGenerateResponse(
         video_id=video.id,
         job_id=job.id,
         status="queued",
-        estimated_time=estimated_duration * 2,  # Processing time estimate
+        estimated_time=int(estimated_duration * 2),  # Processing time estimate
         credits_estimated=estimated_credits,
     )
 

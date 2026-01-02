@@ -1,0 +1,24 @@
+# Kustomize base configuration for NEURA
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: neura
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - backend-deployment.yaml
+  - frontend-deployment.yaml
+  - tts-service-deployment.yaml
+  - avatar-service-deployment.yaml
+  - redis-deployment.yaml
+  - postgres-deployment.yaml
+  - services.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: neura
+  app.kubernetes.io/managed-by: kustomize
+

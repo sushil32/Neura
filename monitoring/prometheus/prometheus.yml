@@ -1,0 +1,75 @@
+# Prometheus configuration for NEURA platform
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'neura-monitor'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - alertmanager:9093
+
+# Rule files
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # NEURA Backend API
+  - job_name: 'neura-backend'
+    metrics_path: '/v1/monitoring/metrics'
+    static_configs:
+      - targets: ['backend:8000']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'backend'
+
+  # TTS Service
+  - job_name: 'neura-tts'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['tts-service:8001']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'tts-service'
+
+  # Avatar Service
+  - job_name: 'neura-avatar'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['avatar-service:8002']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'avatar-service'
+
+  # Redis
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  # PostgreSQL
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Celery (via Flower)
+  - job_name: 'celery'
+    static_configs:
+      - targets: ['flower:5555']
+
+  # Node exporter (host metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+

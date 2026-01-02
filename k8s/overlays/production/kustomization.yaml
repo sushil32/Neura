@@ -1,0 +1,115 @@
+# Kustomize overlay for production environment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: neura
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: production
+
+# Image overrides (updated by CI/CD)
+images:
+  - name: backend
+    newName: ghcr.io/your-org/neura/backend
+    newTag: latest
+  - name: frontend
+    newName: ghcr.io/your-org/neura/frontend
+    newTag: latest
+  - name: tts-service
+    newName: ghcr.io/your-org/neura/tts-service
+    newTag: latest
+  - name: avatar-service
+    newName: ghcr.io/your-org/neura/avatar-service
+    newTag: latest
+
+# Patches for production settings
+patches:
+  # Production resource limits
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "1Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "2000m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "4Gi"
+    target:
+      kind: Deployment
+      name: neura-backend
+
+  # Production HPA settings
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 20
+    target:
+      kind: HorizontalPodAutoscaler
+      name: backend-hpa
+
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 2
+      - op: replace
+        path: /spec/maxReplicas
+        value: 10
+    target:
+      kind: HorizontalPodAutoscaler
+      name: frontend-hpa
+
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 15
+    target:
+      kind: HorizontalPodAutoscaler
+      name: celery-worker-hpa
+
+  # Production ingress hosts
+  - patch: |-
+      - op: replace
+        path: /spec/tls/0/hosts
+        value:
+          - neura.ai
+          - www.neura.ai
+          - api.neura.ai
+      - op: replace
+        path: /spec/rules/0/host
+        value: neura.ai
+      - op: replace
+        path: /spec/rules/1/host
+        value: api.neura.ai
+    target:
+      kind: Ingress
+      name: neura-ingress
+
+# ConfigMap overrides
+configMapGenerator:
+  - name: neura-config
+    behavior: merge
+    literals:
+      - ENV=production
+      - LOG_LEVEL=INFO
+      - NEXT_PUBLIC_API_URL=https://api.neura.ai
+
+# Secret generator (use External Secrets or Sealed Secrets in real production)
+secretGenerator:
+  - name: neura-secrets
+    behavior: merge
+    literals:
+      - PLACEHOLDER=use-external-secrets-operator
+

@@ -1,0 +1,9 @@
+# Kubernetes namespace for NEURA
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neura
+  labels:
+    name: neura
+    app.kubernetes.io/part-of: neura
+

@@ -115,8 +115,76 @@ services:
       - celery-worker
     command: celery -A app.workers.celery_app beat --loglevel=info
 
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: neura-flower
+    env_file:
+      - .env.local
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+      - celery-worker
+    command: celery -A app.workers.celery_app flower --port=5555
+
+  # GPU-enabled TTS service (Coqui XTTS)
+  tts-service:
+    build:
+      context: ./services/tts
+      dockerfile: Dockerfile
+    container_name: neura-tts
+    env_file:
+      - .env.local
+    volumes:
+      - ./services/tts:/app
+      - tts_models:/app/models
+      - voice_samples:/app/voices
+    ports:
+      - "8001:8001"
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Remove deploy section if no GPU available - service will use CPU
+
+  # GPU-enabled Avatar service (Wav2Lip)
+  avatar-service:
+    build:
+      context: ./services/avatar
+      dockerfile: Dockerfile
+    container_name: neura-avatar
+    env_file:
+      - .env.local
+    volumes:
+      - ./services/avatar:/app
+      - avatar_models:/app/models
+      - avatar_images:/app/avatars
+    ports:
+      - "8002:8002"
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Remove deploy section if no GPU available - service will use CPU
+
 volumes:
   postgres_data:
   redis_data:
   minio_data:
+  tts_models:
+  voice_samples:
+  avatar_models:
+  avatar_images:
 

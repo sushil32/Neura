@@ -3,18 +3,25 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import close_db, init_db
-from app.routers import auth, avatars, jobs, live, llm, tts, users, videos
+from app.middleware import RateLimitMiddleware, SecurityMiddleware
+from app.routers import auth, avatars, jobs, live, llm, tts, users, videos, monitoring
 from app.utils.logging import setup_logging
+from app.utils.monitoring import MetricsMiddleware, init_sentry, capture_exception
 
 # Setup structured logging
 setup_logging()
 logger = structlog.get_logger()
+
+# Initialize Sentry for error tracking
+init_sentry()
 
 
 @asynccontextmanager
@@ -43,14 +50,47 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configure CORS
+# ====================
+# Middleware Stack
+# ====================
+# Note: Middleware is applied in reverse order (last added = first executed)
+
+# 1. CORS - Must be first (outermost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+    ],
 )
+
+# 2. Trusted Host (prevent host header attacks)
+if settings.env == "production":
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.allowed_hosts_list if hasattr(settings, 'allowed_hosts_list') else ["*"],
+    )
+
+# 3. GZip compression for responses
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# 4. Security headers
+app.add_middleware(SecurityMiddleware)
+
+# 5. Rate limiting
+app.add_middleware(
+    RateLimitMiddleware,
+    redis_url=settings.redis_url,
+    enabled=settings.env != "test",  # Disable in tests
+)
+
+# 6. Prometheus metrics collection
+app.add_middleware(MetricsMiddleware)
 
 # Include routers
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
@@ -61,6 +101,7 @@ app.include_router(live.router, prefix="/api/v1/live", tags=["Live Streaming"])
 app.include_router(tts.router, prefix="/api/v1/tts", tags=["Text-to-Speech"])
 app.include_router(llm.router, prefix="/api/v1/llm", tags=["LLM"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["Jobs"])
+app.include_router(monitoring.router, prefix="/v1/monitoring", tags=["Monitoring"])
 
 
 @app.get("/")
@@ -89,6 +130,14 @@ async def global_exception_handler(request, exc):
         method=request.method,
         error=str(exc),
     )
+    
+    # Capture exception in Sentry
+    capture_exception(
+        exc,
+        path=request.url.path,
+        method=request.method,
+    )
+    
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error"},

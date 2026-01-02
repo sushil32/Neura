@@ -1,0 +1,110 @@
+# Kubernetes Services for NEURA
+---
+# Backend API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: neura
+  labels:
+    app: neura-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: neura-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+---
+# Frontend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: neura
+  labels:
+    app: neura-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: neura-frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+      name: http
+---
+# TTS Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tts-service
+  namespace: neura
+  labels:
+    app: neura-tts-service
+spec:
+  type: ClusterIP
+  selector:
+    app: neura-tts-service
+  ports:
+    - port: 8001
+      targetPort: 8001
+      protocol: TCP
+      name: http
+---
+# Avatar Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: avatar-service
+  namespace: neura
+  labels:
+    app: neura-avatar-service
+spec:
+  type: ClusterIP
+  selector:
+    app: neura-avatar-service
+  ports:
+    - port: 8002
+      targetPort: 8002
+      protocol: TCP
+      name: http
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: neura
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      protocol: TCP
+      name: redis
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: neura
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres
+

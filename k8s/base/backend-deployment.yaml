@@ -1,0 +1,150 @@
+# Backend API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neura-backend
+  namespace: neura
+  labels:
+    app: neura-backend
+    tier: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: neura-backend
+  template:
+    metadata:
+      labels:
+        app: neura-backend
+        tier: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/v1/monitoring/metrics"
+    spec:
+      containers:
+        - name: backend
+          image: backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: neura-config
+            - secretRef:
+                name: neura-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /v1/monitoring/health/ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: neura-backend
+                topologyKey: kubernetes.io/hostname
+---
+# Celery Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neura-celery-worker
+  namespace: neura
+  labels:
+    app: neura-celery-worker
+    tier: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: neura-celery-worker
+  template:
+    metadata:
+      labels:
+        app: neura-celery-worker
+        tier: worker
+    spec:
+      containers:
+        - name: celery-worker
+          image: backend:latest
+          imagePullPolicy: Always
+          command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+          envFrom:
+            - configMapRef:
+                name: neura-config
+            - secretRef:
+                name: neura-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+---
+# Celery Beat Deployment (scheduler)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neura-celery-beat
+  namespace: neura
+  labels:
+    app: neura-celery-beat
+    tier: scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: neura-celery-beat
+  template:
+    metadata:
+      labels:
+        app: neura-celery-beat
+        tier: scheduler
+    spec:
+      containers:
+        - name: celery-beat
+          image: backend:latest
+          imagePullPolicy: Always
+          command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info"]
+          envFrom:
+            - configMapRef:
+                name: neura-config
+            - secretRef:
+                name: neura-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+

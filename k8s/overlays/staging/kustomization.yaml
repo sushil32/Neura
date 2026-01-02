@@ -1,0 +1,96 @@
+# Kustomize overlay for staging environment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: neura-staging
+
+resources:
+  - ../../base
+
+namePrefix: staging-
+
+commonLabels:
+  environment: staging
+
+# Image overrides (updated by CI/CD)
+images:
+  - name: backend
+    newName: ghcr.io/your-org/neura/backend
+    newTag: latest
+  - name: frontend
+    newName: ghcr.io/your-org/neura/frontend
+    newTag: latest
+  - name: tts-service
+    newName: ghcr.io/your-org/neura/tts-service
+    newTag: latest
+  - name: avatar-service
+    newName: ghcr.io/your-org/neura/avatar-service
+    newTag: latest
+
+# Patches
+patches:
+  # Reduce replicas for staging
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: neura-backend
+  
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: neura-frontend
+  
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: neura-celery-worker
+
+  # Reduce HPA limits
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+    target:
+      kind: HorizontalPodAutoscaler
+      name: backend-hpa
+
+  - patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2
+    target:
+      kind: HorizontalPodAutoscaler
+      name: frontend-hpa
+
+# ConfigMap overrides
+configMapGenerator:
+  - name: neura-config
+    behavior: merge
+    literals:
+      - ENV=staging
+      - LOG_LEVEL=DEBUG
+      - NEXT_PUBLIC_API_URL=https://staging-api.neura.ai
+
+# Secret overrides (for staging - encrypted in git)
+secretGenerator:
+  - name: neura-secrets
+    behavior: merge
+    literals:
+      - POSTGRES_PASSWORD=staging_password_here
+      - JWT_SECRET_KEY=staging_jwt_secret_here
+

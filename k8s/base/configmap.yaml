@@ -1,0 +1,30 @@
+# ConfigMap for NEURA application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neura-config
+  namespace: neura
+data:
+  ENV: "production"
+  LOG_LEVEL: "INFO"
+  
+  # Database
+  POSTGRES_HOST: "postgres-service"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "neura"
+  
+  # Redis
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  
+  # S3/MinIO
+  S3_REGION: "us-east-1"
+  S3_BUCKET: "neura-storage"
+  
+  # Services
+  TTS_SERVICE_URL: "http://tts-service:8001"
+  AVATAR_SERVICE_URL: "http://avatar-service:8002"
+  
+  # Frontend
+  NEXT_PUBLIC_API_URL: "https://api.neura.ai"
+
