@@ -1,0 +1,234 @@
+"""Videos router."""
+from typing import List, Optional
+from uuid import UUID
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.models.job import Job
+from app.models.user import User
+from app.models.video import Video
+from app.schemas.video import (
+    VideoCreate,
+    VideoGenerateRequest,
+    VideoGenerateResponse,
+    VideoResponse,
+    VideoUpdate,
+)
+from app.utils.deps import RequireCredits, get_current_active_user
+
+router = APIRouter()
+logger = structlog.get_logger()
+
+# Cost estimation
+VIDEO_CREDITS_PER_MINUTE = 10
+
+
+@router.post("", response_model=VideoResponse, status_code=status.HTTP_201_CREATED)
+async def create_video(
+    data: VideoCreate,
+    user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> VideoResponse:
+    """Create a new video draft."""
+    video = Video(
+        user_id=user.id,
+        title=data.title,
+        description=data.description,
+        type=data.type.value,
+        script=data.script,
+        prompt=data.prompt,
+        avatar_id=data.avatar_id,
+        status="draft",
+    )
+    db.add(video)
+    await db.flush()
+    
+    logger.info("Video created", video_id=str(video.id), user_id=str(user.id))
+    return VideoResponse.model_validate(video)
+
+
+@router.get("", response_model=List[VideoResponse])
+async def list_videos(
+    status: Optional[str] = None,
+    type: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> List[VideoResponse]:
+    """List user's videos."""
+    query = select(Video).where(Video.user_id == user.id)
+    
+    if status:
+        query = query.where(Video.status == status)
+    if type:
+        query = query.where(Video.type == type)
+    
+    query = query.order_by(Video.created_at.desc()).limit(limit).offset(offset)
+    
+    result = await db.execute(query)
+    videos = result.scalars().all()
+    
+    return [VideoResponse.model_validate(v) for v in videos]
+
+
+@router.get("/{video_id}", response_model=VideoResponse)
+async def get_video(
+    video_id: UUID,
+    user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> VideoResponse:
+    """Get a specific video."""
+    result = await db.execute(
+        select(Video).where(Video.id == video_id, Video.user_id == user.id)
+    )
+    video = result.scalar_one_or_none()
+    
+    if not video:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Video not found",
+        )
+    
+    return VideoResponse.model_validate(video)
+
+
+@router.patch("/{video_id}", response_model=VideoResponse)
+async def update_video(
+    video_id: UUID,
+    data: VideoUpdate,
+    user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> VideoResponse:
+    """Update a video."""
+    result = await db.execute(
+        select(Video).where(Video.id == video_id, Video.user_id == user.id)
+    )
+    video = result.scalar_one_or_none()
+    
+    if not video:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Video not found",
+        )
+    
+    if video.status not in ["draft", "failed"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Can only edit draft or failed videos",
+        )
+    
+    if data.title is not None:
+        video.title = data.title
+    if data.description is not None:
+        video.description = data.description
+    if data.script is not None:
+        video.script = data.script
+    if data.prompt is not None:
+        video.prompt = data.prompt
+    if data.avatar_id is not None:
+        video.avatar_id = data.avatar_id
+    
+    logger.info("Video updated", video_id=str(video.id))
+    return VideoResponse.model_validate(video)
+
+
+@router.delete("/{video_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_video(
+    video_id: UUID,
+    user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a video."""
+    result = await db.execute(
+        select(Video).where(Video.id == video_id, Video.user_id == user.id)
+    )
+    video = result.scalar_one_or_none()
+    
+    if not video:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Video not found",
+        )
+    
+    await db.delete(video)
+    logger.info("Video deleted", video_id=str(video_id))
+
+
+@router.post("/{video_id}/generate", response_model=VideoGenerateResponse)
+async def generate_video(
+    video_id: UUID,
+    data: VideoGenerateRequest,
+    user: User = Depends(RequireCredits(VIDEO_CREDITS_PER_MINUTE)),
+    db: AsyncSession = Depends(get_db),
+) -> VideoGenerateResponse:
+    """Start video generation."""
+    result = await db.execute(
+        select(Video).where(Video.id == video_id, Video.user_id == user.id)
+    )
+    video = result.scalar_one_or_none()
+    
+    if not video:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Video not found",
+        )
+    
+    if video.status not in ["draft", "failed"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Video is already being processed",
+        )
+    
+    if not video.script:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Script is required for video generation",
+        )
+    
+    # Estimate credits (rough estimate based on script length)
+    words = len(video.script.split())
+    estimated_duration = words // 2  # ~120 words per minute
+    estimated_credits = max(VIDEO_CREDITS_PER_MINUTE, estimated_duration * VIDEO_CREDITS_PER_MINUTE // 60)
+    
+    # Create job
+    job = Job(
+        user_id=user.id,
+        type="video_generation",
+        status="queued",
+        input_data={
+            "video_id": str(video.id),
+            "quality": data.quality,
+            "resolution": data.resolution,
+        },
+        credits_estimated=estimated_credits,
+    )
+    db.add(job)
+    await db.flush()
+    
+    # Update video status
+    video.status = "queued"
+    video.resolution = data.resolution
+    
+    # TODO: Queue Celery task for video generation
+    # task = generate_video_task.delay(str(job.id))
+    # job.celery_task_id = task.id
+    
+    logger.info(
+        "Video generation queued",
+        video_id=str(video.id),
+        job_id=str(job.id),
+    )
+    
+    return VideoGenerateResponse(
+        video_id=video.id,
+        job_id=job.id,
+        status="queued",
+        estimated_time=estimated_duration * 2,  # Processing time estimate
+        credits_estimated=estimated_credits,
+    )
+
