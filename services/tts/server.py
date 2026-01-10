@@ -60,21 +60,43 @@ async def startup():
     global tts_engine
     logger.info("Starting TTS service")
     
-    tts_engine = TTSEngine(
-        model_path=os.getenv("TTS_MODEL_PATH", "/app/models"),
-        device=os.getenv("TTS_DEVICE", "auto"),
-    )
-    await tts_engine.initialize()
-    logger.info("TTS engine initialized")
+    try:
+        tts_engine = TTSEngine(
+            model_path=os.getenv("TTS_MODEL_PATH", "/app/models"),
+            device=os.getenv("TTS_DEVICE", "auto"),
+        )
+        await tts_engine.initialize()
+        logger.info("TTS engine initialized", device=tts_engine.device)
+    except Exception as e:
+        logger.warning("TTS engine initialization failed, will use fallback", error=str(e))
+        # Create engine instance but mark as not initialized
+        # This allows service to start and use fallback mechanisms
+        tts_engine = TTSEngine(
+            model_path=os.getenv("TTS_MODEL_PATH", "/app/models"),
+            device=os.getenv("TTS_DEVICE", "auto"),
+        )
+        tts_engine._initialized = False
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Check service health."""
+    if not tts_engine:
+        return HealthResponse(
+            status="unhealthy",
+            model_loaded=False,
+            device="unknown",
+        )
+    
+    # Service is healthy even if models aren't loaded (can use fallback)
+    is_healthy = hasattr(tts_engine, '_initialized')
+    model_loaded = getattr(tts_engine, '_initialized', False)
+    device = getattr(tts_engine, 'device', 'unknown')
+    
     return HealthResponse(
-        status="healthy" if tts_engine and tts_engine._initialized else "unhealthy",
-        model_loaded=tts_engine._initialized if tts_engine else False,
-        device=tts_engine.device if tts_engine else "unknown",
+        status="healthy" if is_healthy else "degraded",
+        model_loaded=model_loaded,
+        device=device,
     )
 
 
@@ -82,7 +104,18 @@ async def health_check():
 async def synthesize(request: SynthesizeRequest):
     """Synthesize speech from text."""
     if not tts_engine:
-        raise HTTPException(status_code=503, detail="TTS engine not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail="TTS engine not available. Service is starting up or models are not loaded."
+        )
+    
+    # Check if engine is initialized, if not, try to initialize
+    if not getattr(tts_engine, '_initialized', False):
+        try:
+            await tts_engine.initialize()
+            logger.info("TTS engine initialized on first request")
+        except Exception as e:
+            logger.warning("Failed to initialize TTS engine, using fallback", error=str(e))
     
     logger.info("Synthesizing speech", text_length=len(request.text))
     

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { 
@@ -13,64 +13,87 @@ import {
   Trash2,
   MoreVertical,
   Clock,
+  Loader2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatDate, formatDuration } from '@/lib/utils';
+import { videosApi, jobsApi } from '@/lib/api';
+import { toast } from 'sonner';
+import type { Video as VideoType } from '@/lib/types';
 
 export default function VideosPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [videos, setVideos] = useState<VideoType[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  // Mock data - would come from API
-  const videos = [
-    {
-      id: '1',
-      title: 'Product Feature Demo',
-      description: 'Showcasing our new dashboard features',
-      status: 'completed',
-      duration: 180,
-      thumbnail: null,
-      createdAt: '2024-01-15T10:00:00Z',
-      views: 245,
-    },
-    {
-      id: '2',
-      title: 'Onboarding Tutorial',
-      description: 'Getting started guide for new users',
-      status: 'processing',
-      duration: 300,
-      thumbnail: null,
-      createdAt: '2024-01-14T15:30:00Z',
-      views: 0,
-    },
-    {
-      id: '3',
-      title: 'Weekly Update',
-      description: 'Company announcements and updates',
-      status: 'completed',
-      duration: 120,
-      thumbnail: null,
-      createdAt: '2024-01-13T09:00:00Z',
-      views: 523,
-    },
-    {
-      id: '4',
-      title: 'Marketing Promo',
-      description: 'New year promotional video',
-      status: 'draft',
-      duration: 60,
-      thumbnail: null,
-      createdAt: '2024-01-12T14:00:00Z',
-      views: 0,
-    },
-  ];
+  const fetchVideos = useCallback(async () => {
+    try {
+      setError(null);
+      const params: any = {};
+      if (statusFilter !== 'all') {
+        params.status = statusFilter;
+      }
+      const response = await videosApi.list(params);
+      setVideos(response.videos || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load videos');
+      toast.error('Failed to load videos');
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter]);
+
+  useEffect(() => {
+    fetchVideos();
+  }, [fetchVideos]);
+
+  // Poll for processing videos
+  useEffect(() => {
+    const processingVideos = videos.filter(v => 
+      v.status === 'processing' || v.status === 'queued'
+    );
+    
+    if (processingVideos.length === 0) return;
+
+    const interval = setInterval(() => {
+      fetchVideos();
+    }, 5000); // Poll every 5 seconds
+
+    return () => clearInterval(interval);
+  }, [videos, fetchVideos]);
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this video?')) return;
+    
+    try {
+      setDeletingId(id);
+      await videosApi.delete(id);
+      toast.success('Video deleted');
+      setVideos(videos.filter(v => v.id !== id));
+    } catch (err: any) {
+      toast.error('Failed to delete video');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleDownload = (video: VideoType) => {
+    if (video.video_url) {
+      window.open(video.video_url, '_blank');
+    } else {
+      toast.error('Video not available yet');
+    }
+  };
 
   const filteredVideos = videos.filter((video) => {
-    const matchesSearch = video.title.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || video.status === statusFilter;
-    return matchesSearch && matchesStatus;
+    const matchesSearch = video.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (video.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false);
+    return matchesSearch;
   });
 
   const getStatusBadge = (status: string) => {
@@ -131,8 +154,19 @@ export default function VideosPage() {
           </div>
         </div>
 
-        {/* Videos Grid */}
-        {filteredVideos.length > 0 ? (
+        {/* Loading State */}
+        {loading ? (
+          <div className="flex items-center justify-center py-16">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+          </div>
+        ) : error ? (
+          <Card>
+            <CardContent className="py-16 text-center">
+              <p className="text-destructive mb-4">{error}</p>
+              <Button onClick={fetchVideos}>Retry</Button>
+            </CardContent>
+          </Card>
+        ) : filteredVideos.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredVideos.map((video, index) => (
               <motion.div
@@ -142,50 +176,83 @@ export default function VideosPage() {
                 transition={{ delay: index * 0.1 }}
               >
                 <Card className="overflow-hidden group">
-                  <div className="aspect-video bg-muted relative">
-                    {video.thumbnail ? (
-                      <img
-                        src={video.thumbnail}
-                        alt={video.title}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-neura-400/10 to-neura-600/10">
-                        <Video className="w-12 h-12 text-muted-foreground" />
+                  <Link href={`/videos/${video.id}`}>
+                    <div className="aspect-video bg-muted relative cursor-pointer">
+                      {video.thumbnail_url ? (
+                        <img
+                          src={video.thumbnail_url}
+                          alt={video.title}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-neura-400/10 to-neura-600/10">
+                          <Video className="w-12 h-12 text-muted-foreground" />
+                        </div>
+                      )}
+                      
+                      {/* Overlay */}
+                      <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-2">
+                        {video.status === 'completed' && video.video_url && (
+                          <>
+                            <Button 
+                              size="sm" 
+                              variant="secondary"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                window.open(video.video_url!, '_blank');
+                              }}
+                            >
+                              <Play className="w-4 h-4" />
+                            </Button>
+                            <Button 
+                              size="sm" 
+                              variant="secondary"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                handleDownload(video);
+                              }}
+                            >
+                              <Download className="w-4 h-4" />
+                            </Button>
+                          </>
+                        )}
+                        {(video.status === 'processing' || video.status === 'queued') && (
+                          <Loader2 className="w-8 h-8 animate-spin text-white" />
+                        )}
                       </div>
-                    )}
-                    
-                    {/* Overlay */}
-                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-2">
-                      {video.status === 'completed' && (
-                        <>
-                          <Button size="sm" variant="secondary">
-                            <Play className="w-4 h-4" />
-                          </Button>
-                          <Button size="sm" variant="secondary">
-                            <Download className="w-4 h-4" />
-                          </Button>
-                        </>
+
+                      {/* Duration badge */}
+                      {video.duration && (
+                        <div className="absolute bottom-2 right-2 px-2 py-1 rounded bg-black/70 text-white text-xs">
+                          {formatDuration(video.duration)}
+                        </div>
                       )}
                     </div>
-
-                    {/* Duration badge */}
-                    <div className="absolute bottom-2 right-2 px-2 py-1 rounded bg-black/70 text-white text-xs">
-                      {formatDuration(video.duration)}
-                    </div>
-                  </div>
+                  </Link>
                   
                   <CardContent className="p-4">
                     <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold truncate">{video.title}</h3>
-                        <p className="text-sm text-muted-foreground truncate">
-                          {video.description}
-                        </p>
+                      <Link href={`/videos/${video.id}`} className="flex-1 min-w-0">
+                        <h3 className="font-semibold truncate hover:text-primary transition">{video.title}</h3>
+                        {video.description && (
+                          <p className="text-sm text-muted-foreground truncate">
+                            {video.description}
+                          </p>
+                        )}
+                      </Link>
+                      <div className="relative">
+                        <Button 
+                          variant="ghost" 
+                          size="sm" 
+                          className="shrink-0"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // TODO: Add dropdown menu
+                          }}
+                        >
+                          <MoreVertical className="w-4 h-4" />
+                        </Button>
                       </div>
-                      <Button variant="ghost" size="sm" className="shrink-0">
-                        <MoreVertical className="w-4 h-4" />
-                      </Button>
                     </div>
                     
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -194,8 +261,25 @@ export default function VideosPage() {
                       </span>
                       <div className="flex items-center gap-1">
                         <Clock className="w-3 h-3" />
-                        {formatDate(video.createdAt)}
+                        {formatDate(video.created_at)}
                       </div>
+                    </div>
+                    
+                    {/* Delete button */}
+                    <div className="mt-2 flex justify-end">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDelete(video.id)}
+                        disabled={deletingId === video.id}
+                        className="text-destructive hover:text-destructive"
+                      >
+                        {deletingId === video.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-4 h-4" />
+                        )}
+                      </Button>
                     </div>
                   </CardContent>
                 </Card>

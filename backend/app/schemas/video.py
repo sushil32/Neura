@@ -80,7 +80,6 @@ class VideoResponse(BaseModel):
 class VideoGenerateRequest(BaseModel):
     """Request to start video generation."""
 
-    video_id: UUID
     quality: str = Field(default="balanced", pattern="^(fast|balanced|high)$")
     resolution: str = Field(default="1080p", pattern="^(720p|1080p|4k)$")
 

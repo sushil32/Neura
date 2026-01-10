@@ -1,322 +1,176 @@
-'use client';
+import { useEffect, useRef, useState, useCallback } from 'react';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useAuth } from '@/contexts/AuthContext';
+type WebRTCStatus = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'failed';
 
-interface WebRTCConfig {
-  sessionId: string;
-  avatarId?: string;
-  voiceId?: string;
-  onMessage?: (data: any) => void;
-  onFrame?: (frameData: string) => void;
-  onAudio?: (audioData: string) => void;
-  onConnectionChange?: (state: string) => void;
+interface UseWebRTCProps {
+    sessionId: string;
+    onStatusChange?: (status: WebRTCStatus) => void;
 }
 
-interface WebRTCState {
-  isConnected: boolean;
-  isConnecting: boolean;
-  connectionState: string;
-  error: string | null;
-  stats: {
-    frameCount: number;
-    messageCount: number;
-    latency: number;
-  };
-}
+export function useWebRTC({ sessionId, onStatusChange }: UseWebRTCProps) {
+    const [status, setStatus] = useState<WebRTCStatus>('idle');
+    const [error, setError] = useState<string | null>(null);
 
-export function useWebRTC(config: WebRTCConfig) {
-  const { token } = useAuth();
-  const wsRef = useRef<WebSocket | null>(null);
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const [state, setState] = useState<WebRTCState>({
-    isConnected: false,
-    isConnecting: false,
-    connectionState: 'disconnected',
-    error: null,
-    stats: {
-      frameCount: 0,
-      messageCount: 0,
-      latency: 0,
-    },
-  });
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const pcRef = useRef<RTCPeerConnection | null>(null);
+    const wsRef = useRef<WebSocket | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
 
-  const connect = useCallback(async () => {
-    if (state.isConnecting || state.isConnected) return;
-
-    setState(prev => ({ ...prev, isConnecting: true, error: null }));
-
-    try {
-      // Connect WebSocket for signaling
-      const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000'}/ws/live/${config.sessionId}`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('WebSocket connected');
-        // Send auth token
-        ws.send(JSON.stringify({
-          type: 'auth',
-          token: token,
-        }));
-      };
-
-      ws.onmessage = async (event) => {
-        const data = JSON.parse(event.data);
-        console.log('WS message:', data.type);
-
-        switch (data.type) {
-          case 'session_created':
-            await setupPeerConnection(data.ice_servers);
-            break;
-
-          case 'answer':
-            if (pcRef.current) {
-              const answer = new RTCSessionDescription({
-                type: 'answer',
-                sdp: data.sdp,
-              });
-              await pcRef.current.setRemoteDescription(answer);
-            }
-            break;
-
-          case 'ice_candidate':
-            if (pcRef.current && data.candidate) {
-              await pcRef.current.addIceCandidate(
-                new RTCIceCandidate(data.candidate)
-              );
-            }
-            break;
-
-          case 'connection_ready':
-            setState(prev => ({
-              ...prev,
-              isConnected: true,
-              isConnecting: false,
-              connectionState: 'connected',
-            }));
-            config.onConnectionChange?.('connected');
-            break;
-
-          case 'avatar_response':
-            config.onMessage?.(data);
-            setState(prev => ({
-              ...prev,
-              stats: {
-                ...prev.stats,
-                messageCount: prev.stats.messageCount + 1,
-              },
-            }));
-            break;
-
-          case 'frame':
-            config.onFrame?.(data.data);
-            setState(prev => ({
-              ...prev,
-              stats: {
-                ...prev.stats,
-                frameCount: prev.stats.frameCount + 1,
-              },
-            }));
-            break;
-
-          case 'audio':
-            config.onAudio?.(data.data);
-            break;
-
-          case 'pong':
-            // Calculate latency
-            if (data.timestamp) {
-              const latency = Date.now() - new Date(data.timestamp).getTime();
-              setState(prev => ({
-                ...prev,
-                stats: {
-                  ...prev.stats,
-                  latency,
-                },
-              }));
-            }
-            break;
-
-          case 'error':
-            console.error('WebRTC error:', data.error);
-            setState(prev => ({ ...prev, error: data.error }));
-            break;
+    const cleanup = useCallback(() => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
         }
-      };
-
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setState(prev => ({
-          ...prev,
-          isConnecting: false,
-          error: 'WebSocket connection failed',
-        }));
-      };
-
-      ws.onclose = () => {
-        console.log('WebSocket closed');
-        disconnect();
-      };
-
-    } catch (error) {
-      console.error('Connection error:', error);
-      setState(prev => ({
-        ...prev,
-        isConnecting: false,
-        error: error instanceof Error ? error.message : 'Connection failed',
-      }));
-    }
-  }, [config.sessionId, token, state.isConnecting, state.isConnected]);
-
-  const setupPeerConnection = async (iceServers: RTCIceServer[]) => {
-    try {
-      // Create peer connection
-      const pc = new RTCPeerConnection({
-        iceServers: iceServers || [
-          { urls: 'stun:stun.l.google.com:19302' },
-        ],
-      });
-      pcRef.current = pc;
-
-      // Handle ICE candidates
-      pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'ice_candidate',
-            candidate: event.candidate,
-          }));
+        if (pcRef.current) {
+            pcRef.current.close();
+            pcRef.current = null;
         }
-      };
+        if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+        setStatus('disconnected');
+    }, []);
 
-      // Handle connection state changes
-      pc.onconnectionstatechange = () => {
-        console.log('Connection state:', pc.connectionState);
-        setState(prev => ({
-          ...prev,
-          connectionState: pc.connectionState,
-          isConnected: pc.connectionState === 'connected',
-        }));
-        config.onConnectionChange?.(pc.connectionState);
-      };
+    const connect = useCallback(async () => {
+        try {
+            setStatus('connecting');
+            setError(null);
 
-      // Handle incoming tracks (video/audio from server)
-      pc.ontrack = (event) => {
-        console.log('Received track:', event.track.kind);
-        // Handle incoming media streams
-      };
+            // 1. Get User Media
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            streamRef.current = stream;
 
-      // Create and send offer
-      const offer = await pc.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: true,
-      });
-      await pc.setLocalDescription(offer);
+            // 2. Init WebSocket for Signaling
+            // Adjust URL based on environment/proxy
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+            const wsProtocol = apiUrl.startsWith('https') ? 'wss' : 'ws';
+            const wsBase = apiUrl.replace(/^https?/, wsProtocol);
+            const wsUrl = `${wsBase}/api/v1/live/ws/${sessionId}`;
 
-      wsRef.current?.send(JSON.stringify({
-        type: 'offer',
-        sdp: offer.sdp,
-        sdp_type: 'offer',
-      }));
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
 
-    } catch (error) {
-      console.error('Peer connection setup failed:', error);
-      throw error;
-    }
-  };
+            await new Promise<void>((resolve, reject) => {
+                ws.onopen = () => resolve();
+                ws.onerror = (err) => reject(err);
+            });
 
-  const disconnect = useCallback(() => {
-    // Close peer connection
-    if (pcRef.current) {
-      pcRef.current.close();
-      pcRef.current = null;
-    }
+            // 3. Init RTCPeerConnection
+            const pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            pcRef.current = pc;
 
-    // Close WebSocket
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+            // Add local tracks
+            stream.getTracks().forEach(track => {
+                pc.addTrack(track, stream);
+            });
 
-    setState({
-      isConnected: false,
-      isConnecting: false,
-      connectionState: 'disconnected',
-      error: null,
-      stats: {
-        frameCount: 0,
-        messageCount: 0,
-        latency: 0,
-      },
-    });
-    config.onConnectionChange?.('disconnected');
-  }, []);
+            // Handle connection state
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                console.log('WebRTC State:', state);
+                if (state === 'connected') setStatus('connected');
+                if (state === 'failed') setStatus('failed');
+            };
 
-  const sendMessage = useCallback((text: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'message',
-        content: text,
-      }));
-    }
-  }, []);
+            // Handle incoming tracks (Remote Stream)
+            pc.ontrack = (event) => {
+                console.log('Track received:', event.track.kind);
+                if (videoRef.current) {
+                    if (!videoRef.current.srcObject) {
+                        videoRef.current.srcObject = new MediaStream();
+                    }
+                    (videoRef.current.srcObject as MediaStream).addTrack(event.track);
+                }
+            };
 
-  const sendAudio = useCallback((audioData: Blob) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(',')[1];
-        wsRef.current?.send(JSON.stringify({
-          type: 'audio',
-          audio: base64,
-        }));
-      };
-      reader.readAsDataURL(audioData);
-    }
-  }, []);
+            // Handle ICE candidates - send to server
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('Sending ICE candidate');
+                    ws.send(JSON.stringify({
+                        type: 'candidate',
+                        content: JSON.stringify(event.candidate),
+                        metadata: {}
+                    }));
+                }
+            };
 
-  const updateConfig = useCallback((newConfig: { avatarId?: string; voiceId?: string }) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'config',
-        ...newConfig,
-      }));
-    }
-  }, []);
+            // 4. Create Offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
 
-  const ping = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'ping',
-        timestamp: new Date().toISOString(),
-      }));
-    }
-  }, []);
+            // 5. Send Offer via WS
+            ws.send(JSON.stringify({
+                type: 'offer',
+                content: offer.sdp,
+                metadata: { type: 'offer' }
+            }));
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      disconnect();
+            // 6. Handle messages from WS (Answer + ICE candidates)
+            ws.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'answer') {
+                    await pc.setRemoteDescription(new RTCSessionDescription({
+                        type: 'answer',
+                        sdp: msg.content
+                    }));
+                } else if (msg.type === 'candidate' && msg.content) {
+                    try {
+                        const candidate = JSON.parse(msg.content);
+                        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                        console.log('Added remote ICE candidate');
+                    } catch (e) {
+                        console.error('Error adding ICE candidate:', e);
+                    }
+                }
+            };
+
+        } catch (err: any) {
+            console.error('WebRTC Error:', err);
+            setError(err.message || 'Failed to connect');
+            setStatus('failed');
+            cleanup();
+        }
+    }, [sessionId, cleanup]);
+
+    useEffect(() => {
+        return cleanup;
+    }, [cleanup]);
+
+    const [stats, setStats] = useState({ latency: 0, frameCount: 0, messageCount: 0 });
+
+    // Helper properties
+    const isConnected = status === 'connected';
+    const isConnecting = status === 'connecting';
+
+    const sendMessage = useCallback((text: string) => {
+        console.log('Sending message (stub):', text);
+        // TODO: Implement DataChannel
+    }, []);
+
+    const sendAudio = useCallback((blob: Blob) => {
+        console.log('Sending audio (stub):', blob.size);
+        // TODO: Implement send
+    }, []);
+
+    const updateConfig = useCallback((config: any) => {
+        console.log('Updating config:', config);
+    }, []);
+
+    return {
+        connect,
+        disconnect: cleanup,
+        status,
+        error,
+        videoRef,
+        stats,
+        isConnected,
+        isConnecting,
+        sendMessage,
+        sendAudio,
+        updateConfig
     };
-  }, [disconnect]);
-
-  // Periodic ping for latency measurement
-  useEffect(() => {
-    if (!state.isConnected) return;
-
-    const interval = setInterval(ping, 5000);
-    return () => clearInterval(interval);
-  }, [state.isConnected, ping]);
-
-  return {
-    ...state,
-    connect,
-    disconnect,
-    sendMessage,
-    sendAudio,
-    updateConfig,
-  };
 }
-
-export default useWebRTC;
-

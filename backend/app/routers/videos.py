@@ -221,8 +221,7 @@ async def generate_video(
             "video_id": str(video.id),
             "quality": data.quality,
             "resolution": data.resolution,
-            "voice_id": data.voice_id,
-            "avatar_id": data.avatar_id,
+            "avatar_id": str(video.avatar_id) if video.avatar_id else None,
         },
         credits_estimated=estimated_credits,
     )
@@ -232,10 +231,6 @@ async def generate_video(
     # Update video with settings
     video.status = "queued"
     video.resolution = data.resolution
-    if data.voice_id:
-        video.voice_id = data.voice_id
-    if data.avatar_id:
-        video.avatar_id = data.avatar_id
     
     await db.commit()
     

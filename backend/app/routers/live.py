@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
@@ -17,6 +18,9 @@ from app.utils.deps import get_current_active_user, RequireCredits
 
 router = APIRouter()
 logger = structlog.get_logger()
+
+# Live Service URL (use localhost since live-service uses host network)
+LIVE_SERVICE_URL = "http://localhost:8003"
 
 # Live session cost
 LIVE_CREDITS_PER_MINUTE = 5
@@ -221,7 +225,46 @@ async def live_websocket(
             data = await websocket.receive_json()
             message = LiveMessage(**data)
             
-            if message.type == "text":
+            if message.type == "offer":
+                # Handle WebRTC Offer
+                logger.info("Received WebRTC Offer", session_id=session_id)
+                sdp = message.content
+                # Fix: If content is JSON string, parse it, otherwise treat as SDP
+                
+                async with httpx.AsyncClient() as client:
+                    try:
+                        # Forward offer to Live Service
+                        # Live Service expects { "sdp": "...", "type": "offer" }
+                        # We assume message.content contains the SDP string
+                        response = await client.post(
+                            f"{LIVE_SERVICE_URL}/offer",
+                            json={"sdp": message.content, "type": "offer"},
+                            timeout=10.0
+                        )
+                        response.raise_for_status()
+                        answer_data = response.json()
+                        
+                        # Send Answer back to client
+                        await websocket.send_json({
+                            "type": "answer",
+                            "content": answer_data["sdp"],
+                            "metadata": {"type": "answer"}
+                        })
+                        logger.info("Sent WebRTC Answer", session_id=session_id)
+                        
+                    except httpx.RequestError as exc:
+                        logger.error("Failed to contact Live Service", error=str(exc))
+                        await websocket.send_json({
+                            "type": "error",
+                            "content": "Live service unavailable",
+                            "metadata": {"code": 503}
+                        })
+
+            elif message.type == "candidate":
+                # Handle ICE Candidate (not implemented in Phase 1 if we use single offer/answer)
+                pass
+
+            elif message.type == "text":
                 # Process text input through LLM -> TTS -> Avatar pipeline
                 # This is a placeholder - actual implementation would integrate services
                 response = {

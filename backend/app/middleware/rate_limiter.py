@@ -200,7 +200,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return response
             
         except Exception as e:
-            logger.error("Rate limiting error", error=str(e))
-            # Allow request on error
-            return await call_next(request)
+            logger.error("Rate limiting error", error=str(e), exc_info=True)
+            # On error, bypass rate limiting and proceed with request
+            try:
+                return await call_next(request)
+            except Exception as inner_e:
+                logger.error("Error in call_next after rate limit error", error=str(inner_e))
+                # Last resort: return a 500 error
+                return Response(
+                    content='{"detail": "Internal server error"}',
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    headers={"Content-Type": "application/json"},
+                )
 

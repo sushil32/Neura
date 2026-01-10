@@ -20,10 +20,10 @@ class Settings(BaseSettings):
 
     # Database
     postgres_host: str = "localhost"
-    postgres_port: int = 5432
+    postgres_port: int = 5433
     postgres_db: str = "neura"
     postgres_user: str = "neura"
-    postgres_password: str = "neura"
+    postgres_password: str = "neura_dev_password"
     database_url: Optional[str] = None
 
     @property
@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/2"
 
     # S3/MinIO
-    s3_endpoint: str = "http://localhost:9000"
+    s3_endpoint: str = "http://localhost:9000"  # Internal endpoint for backend
+    s3_public_endpoint: str = "http://localhost:9000"  # Public endpoint for frontend
     s3_access_key: str = "neura_minio"
     s3_secret_key: str = "neura_minio_password"
     s3_bucket: str = "neura-storage"

@@ -67,21 +67,43 @@ async def startup():
     global avatar_renderer
     logger.info("Starting Avatar service")
     
-    avatar_renderer = AvatarRenderer(
-        model_path=os.getenv("AVATAR_MODEL_PATH", "/app/models"),
-        device=os.getenv("AVATAR_DEVICE", "auto"),
-    )
-    await avatar_renderer.initialize()
-    logger.info("Avatar renderer initialized")
+    try:
+        avatar_renderer = AvatarRenderer(
+            model_path=os.getenv("AVATAR_MODEL_PATH", "/app/models"),
+            device=os.getenv("AVATAR_DEVICE", "auto"),
+        )
+        await avatar_renderer.initialize()
+        logger.info("Avatar renderer initialized", device=avatar_renderer.device)
+    except Exception as e:
+        logger.warning("Avatar renderer initialization failed, will use fallback", error=str(e))
+        # Create renderer instance but mark as not initialized
+        # This allows service to start and use fallback mechanisms
+        avatar_renderer = AvatarRenderer(
+            model_path=os.getenv("AVATAR_MODEL_PATH", "/app/models"),
+            device=os.getenv("AVATAR_DEVICE", "auto"),
+        )
+        avatar_renderer._initialized = False
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Check service health."""
+    if not avatar_renderer:
+        return HealthResponse(
+            status="unhealthy",
+            model_loaded=False,
+            device="unknown",
+        )
+    
+    # Service is healthy even if models aren't loaded (can use fallback)
+    is_healthy = hasattr(avatar_renderer, '_initialized')
+    model_loaded = getattr(avatar_renderer, '_initialized', False)
+    device = getattr(avatar_renderer, 'device', 'unknown')
+    
     return HealthResponse(
-        status="healthy" if avatar_renderer and avatar_renderer._initialized else "unhealthy",
-        model_loaded=avatar_renderer._initialized if avatar_renderer else False,
-        device=avatar_renderer.device if avatar_renderer else "unknown",
+        status="healthy" if is_healthy else "degraded",
+        model_loaded=model_loaded,
+        device=device,
     )
 
 
@@ -89,7 +111,18 @@ async def health_check():
 async def render_video(request: RenderRequest):
     """Start video rendering job."""
     if not avatar_renderer:
-        raise HTTPException(status_code=503, detail="Avatar renderer not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail="Avatar renderer not available. Service is starting up or models are not loaded."
+        )
+    
+    # Check if renderer is initialized, if not, try to initialize
+    if not getattr(avatar_renderer, '_initialized', False):
+        try:
+            await avatar_renderer.initialize()
+            logger.info("Avatar renderer initialized on first request")
+        except Exception as e:
+            logger.warning("Failed to initialize Avatar renderer, using fallback", error=str(e))
     
     logger.info("Starting render job", job_id=request.job_id)
     

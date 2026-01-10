@@ -64,17 +64,19 @@ async def list_avatars(
     db: AsyncSession = Depends(get_db),
 ) -> AvatarListResponse:
     """List available avatars (user's own + public)."""
-    conditions = [Avatar.user_id == user.id]
+    base_conditions = [Avatar.user_id == user.id]
     
     if include_public:
-        conditions.append(Avatar.is_public == True)
+        base_conditions.append(Avatar.is_public == True)
+        
+    query = select(Avatar).where(or_(*base_conditions))
     
     if not include_premium:
-        conditions.append(or_(Avatar.is_premium == False, Avatar.user_id == user.id))
+        # If not requesting premium, filter out premium UNLESS it's user's own
+        query = query.where(or_(Avatar.is_premium == False, Avatar.user_id == user.id))
     
     query = (
-        select(Avatar)
-        .where(or_(*conditions))
+        query
         .order_by(Avatar.is_default.desc(), Avatar.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -84,7 +86,11 @@ async def list_avatars(
     avatars = result.scalars().all()
     
     # Get total count
-    count_query = select(Avatar).where(or_(*conditions))
+    # Get total count
+    count_query = select(Avatar).where(or_(*base_conditions))
+    if not include_premium:
+        count_query = count_query.where(or_(Avatar.is_premium == False, Avatar.user_id == user.id))
+    
     count_result = await db.execute(count_query)
     total = len(count_result.scalars().all())
     

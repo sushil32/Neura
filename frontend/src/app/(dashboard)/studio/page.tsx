@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { useRouter } from 'next/navigation';
 import { 
   Sparkles, 
   Video, 
@@ -19,15 +20,85 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { llmApi, videosApi } from '@/lib/api';
+import { llmApi, videosApi, avatarsApi, ttsApi, jobsApi } from '@/lib/api';
+import type { Avatar, Voice, Job } from '@/lib/types';
 
 export default function StudioPage() {
+  const router = useRouter();
   const [step, setStep] = useState<'script' | 'avatar' | 'settings' | 'preview'>('script');
   const [isGenerating, setIsGenerating] = useState(false);
   const [script, setScript] = useState('');
   const [topic, setTopic] = useState('');
   const [videoType, setVideoType] = useState('explainer');
   const [duration, setDuration] = useState(60);
+  const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null);
+  const [selectedVoice, setSelectedVoice] = useState<string | null>(null);
+  const [resolution, setResolution] = useState('1080p');
+  const [quality, setQuality] = useState('balanced');
+  const [avatars, setAvatars] = useState<Avatar[]>([]);
+  const [voices, setVoices] = useState<Voice[]>([]);
+  const [loadingAvatars, setLoadingAvatars] = useState(false);
+  const [loadingVoices, setLoadingVoices] = useState(false);
+  const [currentJob, setCurrentJob] = useState<Job | null>(null);
+  const [generatedVideoId, setGeneratedVideoId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      setLoadingAvatars(true);
+      setLoadingVoices(true);
+      try {
+        const [avatarsResponse, voicesResponse] = await Promise.all([
+          avatarsApi.list({ include_public: true }),
+          ttsApi.listVoices(),
+        ]);
+        setAvatars(avatarsResponse.avatars || []);
+        setVoices(voicesResponse.voices || []);
+        
+        // Set defaults
+        if (avatarsResponse.avatars.length > 0 && !selectedAvatar) {
+          const defaultAvatar = avatarsResponse.avatars.find(a => a.is_default) || avatarsResponse.avatars[0];
+          setSelectedAvatar(defaultAvatar.id);
+        }
+        if (voicesResponse.voices.length > 0 && !selectedVoice) {
+          const defaultVoice = voicesResponse.voices.find(v => v.is_default) || voicesResponse.voices[0];
+          setSelectedVoice(defaultVoice.id);
+        }
+      } catch (err: any) {
+        toast.error('Failed to load avatars/voices');
+      } finally {
+        setLoadingAvatars(false);
+        setLoadingVoices(false);
+      }
+    };
+    fetchData();
+  }, []);
+
+  // Poll for job status if video is generating
+  useEffect(() => {
+    if (!currentJob || currentJob.status === 'completed' || currentJob.status === 'failed') {
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        const job = await jobsApi.get(currentJob.id);
+        setCurrentJob(job);
+        
+        if (job.status === 'completed') {
+          toast.success('Video generation completed!');
+          if (generatedVideoId) {
+            router.push(`/videos/${generatedVideoId}`);
+          }
+        } else if (job.status === 'failed') {
+          toast.error('Video generation failed');
+        }
+      } catch (err) {
+        // Ignore polling errors
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [currentJob, generatedVideoId, router]);
 
   const handleGenerateScript = async () => {
     if (!topic.trim()) {
@@ -57,23 +128,35 @@ export default function StudioPage() {
       return;
     }
 
+    if (!selectedAvatar) {
+      toast.error('Please select an avatar');
+      return;
+    }
+
     setIsGenerating(true);
     try {
       const video = await videosApi.create({
         title: topic || 'Untitled Video',
         type: videoType,
         script,
+        avatar_id: selectedAvatar,
       });
       
-      // Start generation
-      await videosApi.generate(video.id, {
-        quality: 'balanced',
-        resolution: '1080p',
+      setGeneratedVideoId(video.id);
+      
+      // Start generation - fixed: removed video_id from body
+      const generateResponse = await videosApi.generate(video.id, {
+        quality: quality as 'fast' | 'balanced' | 'high',
+        resolution: resolution as '720p' | '1080p' | '4k',
       });
+      
+      // Fetch job to track progress
+      const job = await jobsApi.get(generateResponse.job_id);
+      setCurrentJob(job);
       
       toast.success('Video generation started!');
-    } catch (error) {
-      toast.error('Failed to create video');
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to create video');
     } finally {
       setIsGenerating(false);
     }
@@ -227,31 +310,83 @@ export default function StudioPage() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Users className="w-5 h-5" />
-                    Select Avatar
+                    Select Avatar & Voice
                   </CardTitle>
                   <CardDescription>
-                    Choose an avatar for your video
+                    Choose an avatar and voice for your video
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-3 gap-4 mb-6">
-                    {[1, 2, 3, 4, 5, 6].map((i) => (
-                      <div
-                        key={i}
-                        className="aspect-square rounded-xl bg-muted border-2 border-transparent hover:border-primary cursor-pointer transition overflow-hidden"
-                      >
-                        <div className="w-full h-full bg-gradient-to-br from-neura-400/20 to-neura-600/20 flex items-center justify-center">
-                          <Users className="w-8 h-8 text-muted-foreground" />
-                        </div>
+                <CardContent className="space-y-6">
+                  <div>
+                    <Label>Avatar</Label>
+                    {loadingAvatars ? (
+                      <div className="flex items-center justify-center py-8">
+                        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
                       </div>
-                    ))}
+                    ) : (
+                      <div className="grid grid-cols-3 gap-4 mt-2">
+                        {avatars.map((avatar) => (
+                          <div
+                            key={avatar.id}
+                            onClick={() => setSelectedAvatar(avatar.id)}
+                            className={`aspect-square rounded-xl bg-muted border-2 cursor-pointer transition overflow-hidden ${
+                              selectedAvatar === avatar.id
+                                ? 'border-primary'
+                                : 'border-transparent hover:border-primary/50'
+                            }`}
+                          >
+                            {avatar.thumbnail_url ? (
+                              <img
+                                src={avatar.thumbnail_url}
+                                alt={avatar.name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <div className="w-full h-full bg-gradient-to-br from-neura-400/20 to-neura-600/20 flex items-center justify-center">
+                                <Users className="w-8 h-8 text-muted-foreground" />
+                              </div>
+                            )}
+                            {avatar.is_default && (
+                              <span className="absolute top-1 right-1 px-1.5 py-0.5 rounded bg-primary text-primary-foreground text-xs">
+                                Default
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <Label>Voice</Label>
+                    {loadingVoices ? (
+                      <div className="flex items-center justify-center py-4">
+                        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+                      </div>
+                    ) : (
+                      <select
+                        value={selectedVoice || ''}
+                        onChange={(e) => setSelectedVoice(e.target.value)}
+                        className="w-full h-10 px-3 rounded-lg border border-input bg-background mt-2"
+                      >
+                        <option value="">Select a voice...</option>
+                        {voices.map((voice) => (
+                          <option key={voice.id} value={voice.id}>
+                            {voice.name} ({voice.language}) {voice.is_default ? '- Default' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                   
                   <div className="flex justify-between">
                     <Button variant="outline" onClick={() => setStep('script')}>
                       Back
                     </Button>
-                    <Button onClick={() => setStep('settings')}>
+                    <Button 
+                      onClick={() => setStep('settings')}
+                      disabled={!selectedAvatar}
+                    >
                       Continue to Settings
                     </Button>
                   </div>
@@ -274,17 +409,25 @@ export default function StudioPage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label>Resolution</Label>
-                      <select className="w-full h-10 px-3 rounded-lg border border-input bg-background">
-                        <option value="1080p">1080p (Full HD)</option>
+                      <select 
+                        value={resolution}
+                        onChange={(e) => setResolution(e.target.value)}
+                        className="w-full h-10 px-3 rounded-lg border border-input bg-background"
+                      >
                         <option value="720p">720p (HD)</option>
+                        <option value="1080p">1080p (Full HD)</option>
                         <option value="4k">4K (Ultra HD)</option>
                       </select>
                     </div>
                     <div>
                       <Label>Quality</Label>
-                      <select className="w-full h-10 px-3 rounded-lg border border-input bg-background">
-                        <option value="balanced">Balanced</option>
+                      <select 
+                        value={quality}
+                        onChange={(e) => setQuality(e.target.value)}
+                        className="w-full h-10 px-3 rounded-lg border border-input bg-background"
+                      >
                         <option value="fast">Fast</option>
+                        <option value="balanced">Balanced</option>
                         <option value="high">High Quality</option>
                       </select>
                     </div>
@@ -326,20 +469,39 @@ export default function StudioPage() {
                     Review your video and start generation
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
-                  <div className="aspect-video rounded-xl bg-muted mb-6 flex items-center justify-center">
+                <CardContent className="space-y-6">
+                  <div className="aspect-video rounded-xl bg-muted flex items-center justify-center">
                     <Play className="w-16 h-16 text-muted-foreground" />
                   </div>
+
+                  {/* Job Progress */}
+                  {currentJob && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">Status: {currentJob.status}</span>
+                        <span className="text-muted-foreground">{Math.round(currentJob.progress * 100)}%</span>
+                      </div>
+                      <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-primary transition-all duration-300"
+                          style={{ width: `${currentJob.progress * 100}%` }}
+                        />
+                      </div>
+                      {currentJob.current_step && (
+                        <p className="text-xs text-muted-foreground">{currentJob.current_step}</p>
+                      )}
+                    </div>
+                  )}
 
                   <div className="flex justify-between">
                     <Button variant="outline" onClick={() => setStep('settings')}>
                       Back
                     </Button>
-                    <Button onClick={handleCreateVideo} disabled={isGenerating}>
-                      {isGenerating ? (
+                    <Button onClick={handleCreateVideo} disabled={isGenerating || !!currentJob}>
+                      {isGenerating || currentJob ? (
                         <>
                           <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          Creating...
+                          {currentJob ? 'Generating...' : 'Creating...'}
                         </>
                       ) : (
                         <>

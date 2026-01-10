@@ -108,23 +108,55 @@ class TTSEngine:
         if self._initialized:
             return
 
+        if os.getenv("FORCE_FALLBACK_TTS", "").lower() == "true":
+            logger.info("FORCE_FALLBACK_TTS enabled, skipping XTTS load")
+            self._use_xtts = False
+            self._initialized = True
+            return
+
         logger.info("Initializing TTS engine", device=self.device)
 
         try:
             # Try to load Coqui TTS
             from TTS.api import TTS
             
+            # Fix for PyTorch 2.6+ weights_only=True default
+            # Register TTS config classes as safe for unpickling
+            import torch
+            try:
+                # Import and register all needed TTS classes
+                from TTS.tts.configs.xtts_config import XttsConfig
+                from TTS.tts.models.xtts import XttsArgs, XttsAudioConfig
+                from TTS.config import BaseDatasetConfig
+                safe_classes = [XttsConfig, XttsArgs, XttsAudioConfig, BaseDatasetConfig]
+                torch.serialization.add_safe_globals(safe_classes)
+                logger.info("Registered TTS config classes for PyTorch 2.6+ compatibility")
+            except Exception as e:
+                logger.warning(f"Could not register safe globals, will try with weights_only=False: {e}")
+                # Fallback: monkeypatch torch.load to use weights_only=False
+                original_torch_load = torch.load
+                def patched_load(*args, **kwargs):
+                    kwargs['weights_only'] = False
+                    return original_torch_load(*args, **kwargs)
+                torch.load = patched_load
+                logger.info("Patched torch.load to use weights_only=False")
+            
             # Load XTTS v2 model
             logger.info("Loading XTTS v2 model...")
             self._model = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
             
-            # Move to device
-            if self.device == "cuda":
-                self._model.to("cuda")
+            # Move to detected device (GPU/MPS/CPU)
+            if self.device in ["cuda", "mps"]:
+                try:
+                    self._model.to(self.device)
+                    logger.info(f"Model moved to {self.device.upper()}")
+                except Exception as e:
+                    logger.warning(f"Failed to move model to {self.device}, falling back to CPU: {e}")
+                    self.device = "cpu"
             
             self._use_xtts = True
             self._initialized = True
-            logger.info("XTTS v2 model loaded successfully")
+            logger.info(f"XTTS v2 model loaded successfully on {self.device.upper()}")
 
         except ImportError as e:
             logger.warning(
@@ -274,7 +306,7 @@ class TTSEngine:
         text: str,
         speed: float,
     ) -> TTSResult:
-        """Fallback synthesizer using simple signal generation."""
+        """Fallback synthesizer generating audible speech-like tones."""
         sample_rate = 22050
         
         # Split into words
@@ -302,18 +334,56 @@ class TTSEngine:
                 end_time=(i + 1) * time_per_word,
             ))
         
-        # Generate audio placeholder (silence with slight noise)
+        # Generate audible audio with speech-like patterns
         num_samples = int(duration * sample_rate)
-        audio = np.random.randn(num_samples).astype(np.float32) * 0.001
+        audio = np.zeros(num_samples, dtype=np.float32)
         
-        # Add some variation to make it more realistic
-        for timing in word_timings:
+        # Base frequencies for speech-like sounds
+        base_freq = 150  # Male-ish fundamental
+        
+        for i, timing in enumerate(word_timings):
             start_sample = int(timing.start_time * sample_rate)
             end_sample = int(timing.end_time * sample_rate)
-            # Add a slight bump for each word
             word_samples = end_sample - start_sample
-            envelope = np.sin(np.linspace(0, np.pi, word_samples)) * 0.01
-            audio[start_sample:end_sample] += envelope
+            
+            if word_samples <= 0:
+                continue
+            
+            # Time array for this word
+            t = np.linspace(0, timing.end_time - timing.start_time, word_samples)
+            
+            # Vary frequency slightly per word for natural variation
+            word_freq = base_freq + (i % 5) * 20 + len(timing.word) * 5
+            
+            # Create harmonic-rich tone (fundamental + harmonics = speech-like)
+            word_audio = np.sin(2 * np.pi * word_freq * t) * 0.3
+            word_audio += np.sin(2 * np.pi * word_freq * 2 * t) * 0.15  # 2nd harmonic
+            word_audio += np.sin(2 * np.pi * word_freq * 3 * t) * 0.08  # 3rd harmonic
+            
+            # Add envelope (attack, sustain, release) for natural sound
+            envelope = np.ones(word_samples)
+            attack = min(int(0.05 * sample_rate), word_samples // 4)
+            release = min(int(0.08 * sample_rate), word_samples // 4)
+            
+            if attack > 0:
+                envelope[:attack] = np.linspace(0, 1, attack)
+            if release > 0:
+                envelope[-release:] = np.linspace(1, 0, release)
+            
+            word_audio *= envelope
+            
+            # Add small gap between words
+            gap_samples = int(0.02 * sample_rate)
+            if word_samples > gap_samples * 2:
+                word_audio[-gap_samples:] = 0
+            
+            # Add to main audio
+            audio[start_sample:end_sample] = word_audio
+        
+        # Normalize to prevent clipping
+        max_val = np.max(np.abs(audio))
+        if max_val > 0:
+            audio = audio / max_val * 0.7
         
         audio_bytes = self._audio_to_bytes(audio, sample_rate)
         
@@ -532,11 +602,43 @@ class TTSEngine:
 
     def get_available_voices(self) -> List[Dict]:
         """Get list of available voice profiles."""
+        # Built-in default voices using XTTS speaker embeddings
         voices = [
-            {"id": "default", "name": "Default Voice", "language": "en", "type": "builtin"},
+            {
+                "id": "default",
+                "name": "Default Voice",
+                "language": "en",
+                "type": "builtin",
+                "gender": "neutral",
+                "description": "Standard XTTS default voice",
+            },
+            {
+                "id": "alex",
+                "name": "Alex",
+                "language": "en",
+                "type": "builtin",
+                "gender": "male",
+                "description": "Clear, professional male voice",
+            },
+            {
+                "id": "sarah",
+                "name": "Sarah",
+                "language": "en",
+                "type": "builtin",
+                "gender": "female",
+                "description": "Warm, friendly female voice",
+            },
+            {
+                "id": "jordan",
+                "name": "Jordan",
+                "language": "en",
+                "type": "builtin",
+                "gender": "neutral",
+                "description": "Versatile, neutral voice",
+            },
         ]
         
-        # List cloned voices
+        # List cloned voices from the voices directory
         voices_dir = Path(self.model_path) / "voices"
         if voices_dir.exists():
             for voice_file in voices_dir.glob("*.wav"):
@@ -545,6 +647,8 @@ class TTSEngine:
                     "name": voice_file.stem.replace("_", " ").title(),
                     "language": "en",
                     "type": "cloned",
+                    "gender": "unknown",
+                    "description": f"Cloned voice from {voice_file.name}",
                 })
         
         return voices

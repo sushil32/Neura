@@ -9,11 +9,11 @@ services:
       POSTGRES_USER: neura
       POSTGRES_PASSWORD: neura_dev_password
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U neura -d neura"]
+      test: [ "CMD-SHELL", "pg_isready -U neura -d neura" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,7 +26,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -44,7 +44,7 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -100,7 +100,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 -Q celery,gpu,default
 
   celery-beat:
     build:
@@ -129,7 +129,7 @@ services:
       - celery-worker
     command: celery -A app.workers.celery_app flower --port=5555
 
-  # GPU-enabled TTS service (Coqui XTTS)
+  # TTS service (Coqui XTTS) - works with or without GPU
   tts-service:
     build:
       context: ./services/tts
@@ -137,6 +137,8 @@ services:
     container_name: neura-tts
     env_file:
       - .env.local
+    environment:
+      - FORCE_FALLBACK_TTS=true
     volumes:
       - ./services/tts:/app
       - tts_models:/app/models
@@ -144,17 +146,41 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - redis
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    # Remove deploy section if no GPU available - service will use CPU
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # Disable healthcheck temporarily - model loading takes 5+ minutes on CPU
+    healthcheck:
+      disable: true
+    # GPU support (optional - uncomment if GPU available)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
-  # GPU-enabled Avatar service (Wav2Lip)
+    # Live Service (WebRTC/aiortc)
+  live-service:
+    build:
+      context: ./services/live
+      dockerfile: Dockerfile
+    container_name: neura-live
+    network_mode: host
+    environment:
+      - PORT=8003
+      - LOG_LEVEL=info
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - TTS_SERVICE_URL=http://localhost:8001
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8003/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Avatar service (Wav2Lip) - works with or without GPU
   avatar-service:
     build:
       context: ./services/avatar
@@ -169,15 +195,23 @@ services:
     ports:
       - "8002:8002"
     depends_on:
-      - redis
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    # Remove deploy section if no GPU available - service will use CPU
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health').read()" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # GPU support (optional - uncomment if GPU available)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
 volumes:
   postgres_data:
@@ -187,4 +221,5 @@ volumes:
   voice_samples:
   avatar_models:
   avatar_images:
+
 

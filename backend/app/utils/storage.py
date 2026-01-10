@@ -318,7 +318,8 @@ class StorageClient:
     
     def _get_public_url(self, bucket: str, key: str) -> str:
         """Get the public URL for an object."""
-        endpoint = settings.s3_endpoint.rstrip("/")
+        # Use public endpoint for frontend access, fallback to internal endpoint
+        endpoint = getattr(settings, 's3_public_endpoint', settings.s3_endpoint).rstrip("/")
         return f"{endpoint}/{bucket}/{key}"
     
     @staticmethod

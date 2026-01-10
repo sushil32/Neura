@@ -2,8 +2,8 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { 
-  Radio, Users, Mic, MicOff, Settings2, Play, Square, 
+import {
+  Radio, Users, Mic, MicOff, Settings2, Play, Square,
   MessageSquare, Volume2, VolumeX, Send, Wifi, WifiOff,
   Video, VideoOff, Maximize2, Clock
 } from 'lucide-react';
@@ -13,9 +13,11 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Slider } from '@/components/ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { liveApi } from '@/lib/api';
+import { liveApi, avatarsApi, ttsApi } from '@/lib/api';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { cn } from '@/lib/utils';
+import type { Avatar, Voice } from '@/lib/types';
+import { Loader2 } from 'lucide-react';
 
 interface ChatMessage {
   id: string;
@@ -32,22 +34,57 @@ export default function LivePage() {
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [selectedAvatar, setSelectedAvatar] = useState('default');
-  const [selectedVoice, setSelectedVoice] = useState('default');
+  const [selectedAvatar, setSelectedAvatar] = useState<string | null>(null);
+  const [selectedVoice, setSelectedVoice] = useState<string | null>(null);
   const [sessionTime, setSessionTime] = useState(0);
   const [currentFrame, setCurrentFrame] = useState<string | null>(null);
-  
+  const [avatars, setAvatars] = useState<Avatar[]>([]);
+  const [voices, setVoices] = useState<Voice[]>([]);
+  const [loadingAvatars, setLoadingAvatars] = useState(false);
+  const [loadingVoices, setLoadingVoices] = useState(false);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => {
+    const fetchData = async () => {
+      setLoadingAvatars(true);
+      setLoadingVoices(true);
+      try {
+        const [avatarsResponse, voicesResponse] = await Promise.all([
+          avatarsApi.list({ include_public: true }),
+          ttsApi.listVoices(),
+        ]);
+        setAvatars(avatarsResponse.avatars || []);
+        setVoices(voicesResponse.voices || []);
+
+        // Set defaults
+        if (avatarsResponse.avatars.length > 0 && !selectedAvatar) {
+          const defaultAvatar = avatarsResponse.avatars.find(a => a.is_default) || avatarsResponse.avatars[0];
+          setSelectedAvatar(defaultAvatar.id);
+        }
+        if (voicesResponse.voices.length > 0 && !selectedVoice) {
+          const defaultVoice = voicesResponse.voices.find(v => v.is_default) || voicesResponse.voices[0];
+          setSelectedVoice(defaultVoice.id);
+        }
+      } catch (err: any) {
+        toast.error('Failed to load avatars/voices');
+      } finally {
+        setLoadingAvatars(false);
+        setLoadingVoices(false);
+      }
+    };
+    fetchData();
+  }, []);
+
   // WebRTC connection
   const webrtc = useWebRTC({
     sessionId: sessionId || '',
-    avatarId: selectedAvatar,
-    voiceId: selectedVoice,
+    avatarId: selectedAvatar || '',
+    voiceId: selectedVoice || '',
     onMessage: (data) => {
       if (data.content) {
         setMessages(prev => [...prev, {
@@ -57,7 +94,7 @@ export default function LivePage() {
           timestamp: new Date(),
         }]);
       }
-      
+
       // Play audio if available
       if (data.audio && !isSpeakerMuted) {
         playAudio(data.audio);
@@ -89,41 +126,46 @@ export default function LivePage() {
   });
 
   const handleStartSession = async () => {
+    if (!selectedAvatar) {
+      toast.error('Please select an avatar');
+      return;
+    }
+
     try {
       const response = await liveApi.startSession({
         avatar_id: selectedAvatar,
-        voice_id: selectedVoice,
       });
       setSessionId(response.session_id);
       setIsLive(true);
-      
+
       // Start session timer
       timerRef.current = setInterval(() => {
         setSessionTime(prev => prev + 1);
       }, 1000);
-      
+
       toast.success('Live session started!');
-    } catch (error) {
-      toast.error('Failed to start session');
+      // WebRTC connection is handled by useEffect watching sessionId
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || 'Failed to start session');
     }
   };
 
   const handleStopSession = async () => {
     if (!sessionId) return;
-    
+
     try {
       // Stop timer
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
-      
+
       // Disconnect WebRTC
       webrtc.disconnect();
-      
+
       // Stop backend session
       await liveApi.stopSession(sessionId);
-      
+
       setIsLive(false);
       setSessionId(null);
       setSessionTime(0);
@@ -149,7 +191,7 @@ export default function LivePage() {
 
   const handleSendMessage = () => {
     if (!message.trim() || !webrtc.isConnected) return;
-    
+
     // Add user message
     setMessages(prev => [...prev, {
       id: Date.now().toString(),
@@ -157,7 +199,7 @@ export default function LivePage() {
       content: message,
       timestamp: new Date(),
     }]);
-    
+
     // Send to WebRTC
     webrtc.sendMessage(message);
     setMessage('');
@@ -181,17 +223,17 @@ export default function LivePage() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const mediaRecorder = new MediaRecorder(stream);
         const chunks: Blob[] = [];
-        
+
         mediaRecorder.ondataavailable = (e) => {
           chunks.push(e.data);
         };
-        
+
         mediaRecorder.onstop = () => {
           const audioBlob = new Blob(chunks, { type: 'audio/webm' });
           webrtc.sendAudio(audioBlob);
           stream.getTracks().forEach(track => track.stop());
         };
-        
+
         mediaRecorderRef.current = mediaRecorder;
         mediaRecorder.start();
         setIsRecording(true);
@@ -253,7 +295,7 @@ export default function LivePage() {
                     height={720}
                     className="w-full h-full object-contain"
                   />
-                  
+
                   {/* Overlay when not connected */}
                   {!webrtc.isConnected && (
                     <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
@@ -270,7 +312,7 @@ export default function LivePage() {
                       )}
                     </div>
                   )}
-                  
+
                   {/* Live indicator */}
                   {isLive && (
                     <div className="absolute top-4 left-4 flex items-center gap-2">
@@ -283,14 +325,14 @@ export default function LivePage() {
                       </div>
                     </div>
                   )}
-                  
+
                   {/* Connection status */}
                   {isLive && (
                     <div className="absolute top-4 right-4 flex items-center gap-2">
                       <div className={cn(
                         "flex items-center gap-1 px-2 py-1 rounded-full text-xs",
-                        webrtc.isConnected 
-                          ? "bg-green-500/20 text-green-400" 
+                        webrtc.isConnected
+                          ? "bg-green-500/20 text-green-400"
                           : "bg-yellow-500/20 text-yellow-400"
                       )}>
                         {webrtc.isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
@@ -299,30 +341,30 @@ export default function LivePage() {
                     </div>
                   )}
                 </div>
-                
+
                 {/* Controls */}
                 <div className="p-4 border-t border-border bg-slate-50 dark:bg-slate-900">
                   <div className="flex items-center gap-4">
-                    <Button 
-                      variant={isRecording ? "destructive" : "outline"} 
-                      size="sm" 
+                    <Button
+                      variant={isRecording ? "destructive" : "outline"}
+                      size="sm"
                       disabled={!isLive || !webrtc.isConnected}
                       onClick={toggleRecording}
                     >
                       {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
                     </Button>
-                    <Button 
-                      variant="outline" 
-                      size="sm" 
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => setIsSpeakerMuted(!isSpeakerMuted)}
                     >
                       {isSpeakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                     </Button>
                     <div className="w-24">
-                      <Slider 
-                        defaultValue={[100]} 
-                        max={100} 
-                        step={1} 
+                      <Slider
+                        defaultValue={[100]}
+                        max={100}
+                        step={1}
                         disabled={isSpeakerMuted}
                       />
                     </div>
@@ -355,15 +397,15 @@ export default function LivePage() {
                   {messages.length === 0 ? (
                     <div className="h-full flex items-center justify-center">
                       <p className="text-muted-foreground text-sm">
-                        {isLive && webrtc.isConnected 
-                          ? 'Start typing to interact with the avatar' 
+                        {isLive && webrtc.isConnected
+                          ? 'Start typing to interact with the avatar'
                           : 'Start a live session to chat'}
                       </p>
                     </div>
                   ) : (
                     <div className="p-4 space-y-4">
                       {messages.map((msg) => (
-                        <div 
+                        <div
                           key={msg.id}
                           className={cn(
                             "flex",
@@ -372,7 +414,7 @@ export default function LivePage() {
                         >
                           <div className={cn(
                             "max-w-[80%] px-4 py-2 rounded-2xl",
-                            msg.role === 'user' 
+                            msg.role === 'user'
                               ? 'bg-neura-500 text-white rounded-br-sm'
                               : 'bg-slate-200 dark:bg-slate-700 rounded-bl-sm'
                           )}>
@@ -396,7 +438,7 @@ export default function LivePage() {
                     disabled={!isLive || !webrtc.isConnected}
                     className="flex-1"
                   />
-                  <Button 
+                  <Button
                     onClick={handleSendMessage}
                     disabled={!isLive || !webrtc.isConnected || !message.trim()}
                   >
@@ -461,8 +503,8 @@ export default function LivePage() {
               <CardContent className="space-y-4">
                 <div className="aspect-square rounded-lg bg-gradient-to-br from-neura-400/20 to-neura-600/20 flex items-center justify-center overflow-hidden">
                   {currentFrame ? (
-                    <img 
-                      src={`data:image/png;base64,${currentFrame}`} 
+                    <img
+                      src={`data:image/png;base64,${currentFrame}`}
                       alt="Avatar"
                       className="w-full h-full object-cover"
                     />
@@ -470,27 +512,33 @@ export default function LivePage() {
                     <Users className="w-12 h-12 text-muted-foreground" />
                   )}
                 </div>
-                <Select 
-                  value={selectedAvatar} 
-                  onValueChange={(v) => {
-                    setSelectedAvatar(v);
-                    if (webrtc.isConnected) {
-                      webrtc.updateConfig({ avatarId: v });
-                    }
-                  }}
-                  disabled={isLive}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select Avatar" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">Default Avatar</SelectItem>
-                    <SelectItem value="professional_male">Professional Male</SelectItem>
-                    <SelectItem value="professional_female">Professional Female</SelectItem>
-                    <SelectItem value="casual_male">Casual Male</SelectItem>
-                    <SelectItem value="casual_female">Casual Female</SelectItem>
-                  </SelectContent>
-                </Select>
+                {loadingAvatars ? (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                  </div>
+                ) : (
+                  <Select
+                    value={selectedAvatar || ''}
+                    onValueChange={(v) => {
+                      setSelectedAvatar(v);
+                      if (webrtc.isConnected) {
+                        webrtc.updateConfig({ avatarId: v });
+                      }
+                    }}
+                    disabled={isLive}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select Avatar" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {avatars.map((avatar) => (
+                        <SelectItem key={avatar.id} value={avatar.id}>
+                          {avatar.name} {avatar.is_default ? '(Default)' : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </CardContent>
             </Card>
 
@@ -500,27 +548,33 @@ export default function LivePage() {
                 <CardTitle>Voice</CardTitle>
               </CardHeader>
               <CardContent>
-                <Select 
-                  value={selectedVoice} 
-                  onValueChange={(v) => {
-                    setSelectedVoice(v);
-                    if (webrtc.isConnected) {
-                      webrtc.updateConfig({ voiceId: v });
-                    }
-                  }}
-                  disabled={isLive}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select Voice" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">Default Voice</SelectItem>
-                    <SelectItem value="male_professional">Male Professional</SelectItem>
-                    <SelectItem value="female_professional">Female Professional</SelectItem>
-                    <SelectItem value="male_casual">Male Casual</SelectItem>
-                    <SelectItem value="female_casual">Female Casual</SelectItem>
-                  </SelectContent>
-                </Select>
+                {loadingVoices ? (
+                  <div className="flex items-center justify-center py-4">
+                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                  </div>
+                ) : (
+                  <Select
+                    value={selectedVoice || ''}
+                    onValueChange={(v) => {
+                      setSelectedVoice(v);
+                      if (webrtc.isConnected) {
+                        webrtc.updateConfig({ voiceId: v });
+                      }
+                    }}
+                    disabled={isLive}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select Voice" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {voices.map((voice) => (
+                        <SelectItem key={voice.id} value={voice.id}>
+                          {voice.name} ({voice.language}) {voice.is_default ? '- Default' : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </CardContent>
             </Card>
 
