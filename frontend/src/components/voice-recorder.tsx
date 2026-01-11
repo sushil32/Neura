@@ -11,15 +11,15 @@ interface VoiceRecorderProps {
     maxDuration?: number; // Maximum recording duration in seconds
 }
 
-const SAMPLE_SCRIPT = `Hello, my name is... and I'm recording my voice for voice cloning. 
-I'll speak naturally and clearly so the AI can learn my unique voice patterns.
-The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.
-I enjoy creating content and sharing my ideas with the world.`;
+const SAMPLE_SCRIPT = `Hello, I'm recording my voice to help the AI learn my unique accent.
+I am speaking naturally and clearly, just like I would in a conversation.
+The diverse culture of India brings many beautiful languages and ways of speaking.
+I want to ensure my voice clone sounds authentic and true to who I am.`;
 
 export function VoiceRecorder({
     onRecordingComplete,
-    minDuration = 6,
-    maxDuration = 30
+    minDuration = 10,
+    maxDuration = 45
 }: VoiceRecorderProps) {
     const [isRecording, setIsRecording] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
@@ -310,8 +310,8 @@ export function VoiceRecorder({
                 <ul className="list-disc list-inside space-y-0.5 ml-2">
                     <li>Find a quiet room with no background noise</li>
                     <li>Speak naturally at a normal pace</li>
-                    <li>Position yourself 6-12 inches from the microphone</li>
-                    <li>Record at least 10-15 seconds for best quality</li>
+                    <li>For Indian accents, speak slightly slower than usual</li>
+                    <li>Record at least 15-20 seconds for best quality</li>
                 </ul>
             </div>
         </div>

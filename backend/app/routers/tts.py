@@ -35,6 +35,7 @@ class TTSRequest(BaseModel):
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     pitch: float = Field(default=1.0, ge=0.5, le=2.0)
     format: str = Field(default="mp3", pattern="^(mp3|wav|ogg)$")
+    language: str = "en"
 
 
 class TTSResponse(BaseModel):
@@ -232,6 +233,7 @@ async def clone_voice(
     name: str = Form(...),
     description: str = Form(None),
     language: str = Form("en"),
+    gender: str = Form("neutral"),
     audio: UploadFile = File(...),
     user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -282,7 +284,7 @@ async def clone_voice(
         name=name,
         description=description,
         language=language,
-        gender="neutral",  # Unknown for cloned voices
+        gender=gender,
         is_cloned=True,
         is_default=False,
         is_public=False,  # User's private cloned voice
@@ -362,9 +364,10 @@ async def generate_tts(
                 json={
                     "text": data.text,
                     "voice_id": voice_id,
-                    "language": "en",
                     "speed": data.speed,
                     "pitch": data.pitch,
+                    "language": "en" if data.language == "en-IN" else data.language,
+                    "accent_language": "hi" if data.language == "en-IN" else None,
                 },
             )
             

@@ -30,8 +30,10 @@ class SynthesizeRequest(BaseModel):
     text: str
     voice_id: Optional[str] = "default"
     language: str = "en"
+    accent_language: Optional[str] = None
     speed: float = 1.0
     pitch: float = 1.0
+    accent_preserve: bool = False
 
 
 class SynthesizeResponse(BaseModel):
@@ -134,8 +136,10 @@ async def synthesize(request: SynthesizeRequest):
             text=request.text,
             voice_sample=voice_sample,
             language=request.language,
+            accent_language=request.accent_language,
             speed=request.speed,
             pitch=request.pitch,
+            accent_preserve=request.accent_preserve,
         )
         
         # Return audio as streaming response
@@ -177,8 +181,10 @@ async def synthesize_stream(request: SynthesizeRequest):
             text=request.text,
             voice_sample=voice_sample,
             language=request.language,
+            accent_language=request.accent_language,
             speed=request.speed,
             pitch=request.pitch,
+            accent_preserve=request.accent_preserve,
         ):
             yield chunk
     

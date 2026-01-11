@@ -310,6 +310,7 @@ export const ttsApi = {
       formData.append('name', data.name);
       formData.append('audio', data.sample_file);
       if (data.language) formData.append('language', data.language);
+      if (data.gender) formData.append('gender', data.gender);
       if (data.description) formData.append('description', data.description);
 
       const response = await api.post('/tts/voices/clone', formData, {

@@ -243,13 +243,27 @@ export default function VoicesPage() {
                     onChange={(e) => setFormData({ ...formData, language: e.target.value })}
                     className="w-full px-3 py-2 border rounded-md bg-background"
                   >
-                    <option value="en">English</option>
+                    <option value="en">English (US/General)</option>
+                    <option value="en-IN">English (Indian)</option>
                     <option value="es">Spanish</option>
                     <option value="fr">French</option>
                     <option value="de">German</option>
                     <option value="it">Italian</option>
                     <option value="pt">Portuguese</option>
                     <option value="hi">Hindi</option>
+                  </select>
+                </div>
+
+                <div>
+                  <Label>Gender</Label>
+                  <select
+                    value={formData.gender}
+                    onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-md bg-background"
+                  >
+                    <option value="neutral">Neutral</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
                   </select>
                 </div>
 
@@ -307,9 +321,12 @@ export default function VoicesPage() {
                       <div className="text-xs text-muted-foreground space-y-1">
                         <p>💡 <strong>Tips for best results:</strong></p>
                         <ul className="list-disc list-inside ml-2">
-                          <li>Use 10-30 seconds of clear speech</li>
+                          <li>Use 15-30 seconds of clear speech</li>
                           <li>No background noise or music</li>
                           <li>WAV format at 24kHz+ is ideal</li>
+                          {formData.language === 'en-IN' && (
+                            <li className="text-neura-500 font-medium">For Indian English, speak clearly and naturally</li>
+                          )}
                         </ul>
                       </div>
                     </div>
@@ -350,6 +367,7 @@ export default function VoicesPage() {
                         await ttsApi.createVoice({
                           name: formData.name,
                           language: formData.language,
+                          gender: formData.gender,
                           sample_file: file,
                         });
                         toast.success('Voice cloned successfully!');

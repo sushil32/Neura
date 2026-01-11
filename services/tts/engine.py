@@ -238,8 +238,10 @@ class TTSEngine:
         text: str,
         voice_sample: Optional[str] = None,
         language: str = "en",
+        accent_language: Optional[str] = None,  # For accent-specific synthesis
         speed: float = 1.3, # 1.3x is closer to natural human conversational pace in XTTS v2
         pitch: float = 1.0,
+        accent_preserve: bool = False,  # Prioritize accent retention
     ) -> TTSResult:
         """
         Synthesize speech from text.
@@ -266,7 +268,10 @@ class TTSEngine:
 
         if self._use_xtts and self._model:
             try:
-                result = await self._synthesize_xtts(text, voice_sample, language, speed)
+                # Use language provided (map en-IN to en)
+                target_lang = "en" if language == "en-IN" else language
+                 
+                result = await self._synthesize_xtts(text, voice_sample, target_lang, speed)
                 
                 # Apply mastering if enabled
                 if self.use_mastering:
@@ -514,8 +519,10 @@ class TTSEngine:
         text: str,
         voice_sample: Optional[str] = None,
         language: str = "en",
+        accent_language: Optional[str] = None,
         speed: float = 1.0,
         pitch: float = 1.0,
+        accent_preserve: bool = False,
         chunk_size: int = 4096,
     ) -> AsyncGenerator[Tuple[bytes, List[WordTiming]], None]:
         """
@@ -526,7 +533,15 @@ class TTSEngine:
 
         # For streaming, we use the full synthesis logic (including speed and mastering)
         # then stream the resulting bytes in chunks.
-        result = await self.synthesize(text, voice_sample, language, speed, pitch)
+        result = await self.synthesize(
+            text, 
+            voice_sample, 
+            language, 
+            accent_language, 
+            speed, 
+            pitch, 
+            accent_preserve
+        )
         
         # Stream in chunks
         audio_data = result.audio_data

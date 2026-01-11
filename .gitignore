@@ -85,3 +85,4 @@ celerybeat.pid
 # Alembic
 alembic/versions/*.pyc
 
+backend_temp_env/
