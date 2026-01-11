@@ -206,7 +206,11 @@ class TTSEngine:
         )
 
         if self._use_xtts and self._model:
-            return await self._synthesize_xtts(text, voice_sample, language, speed)
+            try:
+                return await self._synthesize_xtts(text, voice_sample, language, speed)
+            except Exception as e:
+                logger.error("XTTS synthesis failed, falling back", error=str(e))
+                return await self._synthesize_fallback(text, speed)
         else:
             return await self._synthesize_fallback(text, speed)
 

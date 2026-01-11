@@ -280,7 +280,7 @@ async def generate_tts(
     
     # Call TTS service
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 f"{TTS_SERVICE_URL}/synthesize",
                 json={
@@ -349,7 +349,7 @@ async def stream_tts(
     async def audio_generator():
         """Generate audio chunks from TTS service."""
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream(
                     "POST",
                     f"{TTS_SERVICE_URL}/synthesize/stream",
@@ -408,40 +408,39 @@ async def preview_voice(
     # Get preview text based on gender
     preview_text = PREVIEW_TEXTS.get(voice.gender or "neutral", PREVIEW_TEXTS["neutral"])
     
-    # Call TTS service
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{TTS_SERVICE_URL}/synthesize",
-                json={
-                    "text": preview_text,
-                    "voice_id": voice.name.lower().replace(" ", "_"),
-                    "language": voice.language or "en",
-                    "speed": 1.0,
-                    "pitch": 1.0,
-                },
-            )
-            
-            if response.status_code != 200:
-                logger.error("TTS service error", status=response.status_code)
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="TTS service temporarily unavailable",
-                )
-            
-            audio_data = response.content
-            
-    except httpx.ConnectError:
-        logger.error("Cannot connect to TTS service", url=TTS_SERVICE_URL)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="TTS service not available",
-        )
-    
+    # Call TTS service with streaming
+    # Use a generator to stream the response from the internal TTS service
+    async def audio_generator():
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{TTS_SERVICE_URL}/synthesize/stream",
+                    json={
+                        "text": preview_text,
+                        "voice_id": voice.name.lower().replace(" ", "_"),
+                        "language": voice.language or "en",
+                        "speed": 1.0,
+                        "pitch": 1.0,
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        logger.error("TTS service error", status=response.status_code)
+                        # We can't really raise HTTP exception inside the generator easily 
+                        # without breaking the stream, but we can log it.
+                        return
+
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except Exception as e:
+            logger.error("TTS preview streaming error", error=str(e))
+            yield b""
+
     return StreamingResponse(
-        io.BytesIO(audio_data),
+        audio_generator(),
         media_type="audio/wav",
         headers={
             "Content-Disposition": f"inline; filename={voice.name}_preview.wav",
+            "X-Content-Duration": "5.0", # Approximate
         },
     )

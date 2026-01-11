@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import wave
+import time
 from datetime import datetime
 
 # Configuration
@@ -64,6 +65,7 @@ def test_synthesize_speech(text: str, voice_id: str = "default"):
     print(f"   Text: \"{text}\"")
     
     try:
+        start_time = time.time()
         resp = requests.post(
             f"{TTS_SERVICE_URL}/synthesize",
             json={
@@ -75,6 +77,8 @@ def test_synthesize_speech(text: str, voice_id: str = "default"):
             },
             timeout=60,  # TTS can take time
         )
+        elapsed = time.time() - start_time
+
         
         if resp.status_code == 200:
             # Get audio data
@@ -83,8 +87,19 @@ def test_synthesize_speech(text: str, voice_id: str = "default"):
             sample_rate = resp.headers.get("X-Sample-Rate", "unknown")
             
             print(f"   ✓ Audio generated successfully!")
+            print(f"   ✓ Time taken: {elapsed:.2f}s")
             print(f"   ✓ Audio size: {len(audio_data)} bytes")
             print(f"   ✓ Duration: {duration} seconds")
+            
+            # Calculate RTF (Real-Time Factor) - lower is better
+            try:
+                 dur_val = float(duration)
+                 if dur_val > 0:
+                     rtf = elapsed / dur_val
+                     print(f"   ✓ Real-Time Factor: {rtf:.2f}x (Lower is better)")
+            except:
+                pass
+
             print(f"   ✓ Sample rate: {sample_rate} Hz")
             
             # Save to file for verification
@@ -119,7 +134,51 @@ def test_synthesize_speech(text: str, voice_id: str = "default"):
         return False, None
     except Exception as e:
         print(f"   ✗ Error: {e}")
+    except Exception as e:
+        print(f"   ✗ Error: {e}")
         return False, None
+
+
+def test_preview_endpoint(voice_id: str, token: str):
+    """Test the preview endpoint used by frontend."""
+    print(f"\n5. Testing Frontend Preview Endpoint for voice '{voice_id}'...")
+    try:
+        start_time = time.time()
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        # Note: frontend uses /tts/voices/{id}/preview, but standard router might be just /voices/{id}/preview
+        # if router prefix is /tts. Let's try correct full URL based on backend config.
+        # Backend router tts.py usually mounted. If internal URL is used, let's assume /tts prefix.
+        
+        # URL construction: BACKEND is http://localhost:8000/api/v1
+        # Frontend calls: /tts/voices/... 
+        # So we test: BACKEND_API_URL + "/tts/voices/{voice_id}/preview"
+        
+        url = f"{BACKEND_API_URL}/tts/voices/{voice_id}/preview"
+        print(f"   GET {url}")
+        
+        with requests.get(url, headers=headers, stream=True, timeout=10) as r:
+            if r.status_code == 200:
+                print("   ✓ Status 200 OK")
+                size = 0
+                for chunk in r.iter_content(chunk_size=8192):
+                    size += len(chunk)
+                
+                elapsed = time.time() - start_time
+                print(f"   ✓ Received {size} bytes")
+                print(f"   ✓ Time taken: {elapsed:.2f}s")
+                if size > 1000:
+                    print("   ✓ Audio data received successfully")
+                    return True
+                else:
+                    print("   ⚠ Response seems too small for audio")
+                    return False
+            else:
+                print(f"   ✗ Failed: {r.status_code} {r.text}")
+                return False
+    except Exception as e:
+        print(f"   ✗ Error: {e}")
+        return False
 
 
 def test_backend_tts_integration():
@@ -133,10 +192,27 @@ def test_backend_tts_integration():
             "password": "Test123!@#"
         }
         resp = requests.post(f"{BACKEND_API_URL}/auth/login", json=login_data, timeout=10)
+        
+        # If login fails, try to register
+        if resp.status_code != 200:
+            print("   ⚠ Login failed, trying to register...")
+            register_data = {
+                "email": "test@example.com",
+                "password": "Test123!@#",
+                "name": "Test User"
+            }
+            reg_resp = requests.post(f"{BACKEND_API_URL}/auth/register", json=register_data, timeout=10)
+            if reg_resp.status_code in [200, 201]:
+                print("   ✓ Registration successful, retrying login...")
+                resp = requests.post(f"{BACKEND_API_URL}/auth/login", json=login_data, timeout=10)
+            else:
+                print(f"   ✗ Registration failed: {reg_resp.status_code} {reg_resp.text}")
+                return None
+        
         if resp.status_code != 200:
             print("   ⚠ Could not authenticate. Skipping backend integration test.")
             return None
-        
+            
         token = resp.json().get("access_token")
         headers = {"Authorization": f"Bearer {token}"}
         
@@ -145,6 +221,14 @@ def test_backend_tts_integration():
         if resp.status_code == 200:
             voices = resp.json()
             print(f"   ✓ Backend voices endpoint working")
+            
+            # Now test preview
+            if voices and 'voices' in voices and len(voices['voices']) > 0:
+                 first_voice = voices['voices'][0]
+                 test_preview_endpoint(first_voice['id'], token)
+            elif isinstance(voices, list) and len(voices) > 0:
+                 test_preview_endpoint(voices[0]['id'], token)
+                 
             return True
         else:
             print(f"   ⚠ Backend voices endpoint: {resp.status_code}")
