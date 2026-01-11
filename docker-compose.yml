@@ -191,8 +191,8 @@ services:
       - .env.local
     volumes:
       - ./services/avatar:/app
-      - avatar_models:/app/models
-      - avatar_images:/app/avatars
+      - ./services/avatar/models:/app/models
+      - ./services/avatar/avatars:/app/avatars
     ports:
       - "8002:8002"
     depends_on:

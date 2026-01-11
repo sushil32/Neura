@@ -1,9 +1,9 @@
 """Avatars router."""
-from typing import List, Optional
+from typing import List, Optional, Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status, File
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +17,9 @@ from app.schemas.avatar import (
     AvatarUpdate,
 )
 from app.utils.deps import get_current_active_user
-from app.utils.storage import storage
+from app.utils.storage import storage, BUCKETS
+from app.config import settings
+import httpx
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -189,6 +191,26 @@ async def delete_avatar(
             detail="Avatar not found or not owned by user",
         )
     
+    # 1. Delete from S3 (Best effort)
+    if avatar.thumbnail_url:
+        try:
+            bucket = BUCKETS["avatars"]
+            # Extract key from URL: .../bucket_name/key
+            if f"/{bucket}/" in avatar.thumbnail_url:
+                key = avatar.thumbnail_url.split(f"/{bucket}/")[-1]
+                await storage.delete_file(bucket, key)
+                logger.info("Avatar image deleted from S3", key=key)
+        except Exception as e:
+            logger.warning("Failed to delete avatar from S3", error=str(e))
+
+    # 2. Delete from Avatar Service
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.delete(f"{settings.avatar_service_url}/avatars/{avatar_id}", timeout=5.0)
+            logger.info("Avatar deleted from service", avatar_id=str(avatar_id))
+    except Exception as e:
+        logger.warning("Failed to delete avatar from service", error=str(e))
+
     await db.delete(avatar)
     logger.info("Avatar deleted", avatar_id=str(avatar_id))
 
@@ -196,7 +218,7 @@ async def delete_avatar(
 @router.post("/{avatar_id}/thumbnail", response_model=AvatarResponse)
 async def upload_avatar_thumbnail(
     avatar_id: UUID,
-    file: UploadFile,
+    file: Annotated[UploadFile, File()],
     user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> AvatarResponse:
@@ -222,10 +244,22 @@ async def upload_avatar_thumbnail(
     # Upload to storage
     key = storage.generate_key(f"avatars/{user.id}", file.filename or "thumbnail.jpg")
     content = await file.read()
-    url = await storage.upload_bytes(content, key, file.content_type)
+    url = await storage.upload_bytes(content, BUCKETS["avatars"], key, file.content_type)
     
     avatar.thumbnail_url = url
     logger.info("Avatar thumbnail uploaded", avatar_id=str(avatar.id))
+    
+    # Sync to Avatar Service
+    try:
+        async with httpx.AsyncClient() as client:
+            files = {'image': (file.filename or "image.png", content, file.content_type or "image/png")}
+            data = {'avatar_id': str(avatar.id)}
+            # Use internal service URL
+            await client.post(f"{settings.avatar_service_url}/avatars/upload", data=data, files=files, timeout=10.0)
+            logger.info("Avatar synced to service", avatar_id=str(avatar.id))
+    except Exception as e:
+        logger.warning("Failed to sync avatar to service", error=str(e))
+        # Continue - don't fail user request
     
     return AvatarResponse.model_validate(avatar)
 

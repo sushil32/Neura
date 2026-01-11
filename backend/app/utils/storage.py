@@ -62,8 +62,8 @@ class StorageClient:
                         await s3.create_bucket(Bucket=bucket)
                         logger.info(f"Created bucket: {bucket}")
                         
-                        # Set bucket policy for public read (videos/thumbnails)
-                        if name in ["videos", "thumbnails"]:
+                        # Set bucket policy for public read (videos/thumbnails/avatars/voices)
+                        if name in ["videos", "thumbnails", "avatars", "voices"]:
                             policy = {
                                 "Version": "2012-10-17",
                                 "Statement": [{
@@ -117,7 +117,7 @@ class StorageClient:
                     key,
                     ExtraArgs={
                         "ContentType": content_type,
-                        "ACL": "public-read" if bucket in [BUCKETS["videos"], BUCKETS["thumbnails"]] else "private",
+                        "ACL": "public-read" if bucket in [BUCKETS["videos"], BUCKETS["thumbnails"], BUCKETS["avatars"], BUCKETS["voices"]] else "private",
                     }
                 )
             

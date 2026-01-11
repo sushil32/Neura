@@ -23,6 +23,7 @@ export default function AvatarsPage() {
     description: '',
     is_default: false,
   });
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   useEffect(() => {
     fetchAvatars();
@@ -44,14 +45,25 @@ export default function AvatarsPage() {
 
   const handleCreate = async () => {
     try {
-      await avatarsApi.create({
+      const newAvatar = await avatarsApi.create({
         name: formData.name,
         description: formData.description || undefined,
         is_default: formData.is_default,
       });
+
+      if (selectedFile) {
+        try {
+          await avatarsApi.uploadThumbnail(newAvatar.id, selectedFile);
+        } catch (uploadErr) {
+          console.error('Failed to upload image:', uploadErr);
+          toast.error('Avatar created but image upload failed');
+        }
+      }
+
       toast.success('Avatar created');
       setShowCreateModal(false);
       setFormData({ name: '', description: '', is_default: false });
+      setSelectedFile(null);
       fetchAvatars();
     } catch (err: any) {
       toast.error('Failed to create avatar');
@@ -174,16 +186,16 @@ export default function AvatarsPage() {
                       </span>
                     )}
                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-2">
-                      <Button 
-                        size="sm" 
+                      <Button
+                        size="sm"
                         variant="secondary"
                         onClick={() => openEditModal(avatar)}
                       >
                         <Edit2 className="w-4 h-4 mr-2" />
                         Edit
                       </Button>
-                      <Button 
-                        size="sm" 
+                      <Button
+                        size="sm"
                         variant="destructive"
                         onClick={() => handleDelete(avatar.id)}
                         disabled={deletingId === avatar.id}
@@ -233,13 +245,26 @@ export default function AvatarsPage() {
                   />
                 </div>
                 <div>
-                  <Label>Description (optional)</Label>
                   <Input
                     value={formData.description}
                     onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                     placeholder="Avatar description"
                   />
                 </div>
+                {!editingAvatar && (
+                  <div>
+                    <Label>Avatar Image (Portrait)</Label>
+                    <Input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                      className="cursor-pointer"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Upload a clear portrait photo (PNG/JPG).
+                    </p>
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -257,11 +282,12 @@ export default function AvatarsPage() {
                       setShowCreateModal(false);
                       setEditingAvatar(null);
                       setFormData({ name: '', description: '', is_default: false });
+                      setSelectedFile(null);
                     }}
                   >
                     Cancel
                   </Button>
-                  <Button onClick={editingAvatar ? handleUpdate : handleCreate}>
+                  <Button onClick={editingAvatar ? handleUpdate : handleCreate} disabled={!formData.name || (showCreateModal && !editingAvatar && !selectedFile)}>
                     {editingAvatar ? 'Update' : 'Create'}
                   </Button>
                 </div>
