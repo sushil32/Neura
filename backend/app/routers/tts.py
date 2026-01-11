@@ -3,7 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -225,6 +225,82 @@ async def delete_voice(
     
     await db.delete(voice)
     logger.info("Voice profile deleted", voice_id=str(voice_id))
+
+
+@router.post("/voices/clone", response_model=VoiceResponse, status_code=status.HTTP_201_CREATED)
+async def clone_voice(
+    name: str = Form(...),
+    description: str = Form(None),
+    language: str = Form("en"),
+    audio: UploadFile = File(...),
+    user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> VoiceResponse:
+    """Clone a voice from an audio sample."""
+    logger.info("Voice cloning requested", name=name, filename=audio.filename)
+    
+    # Read audio data
+    audio_data = await audio.read()
+    
+    if len(audio_data) < 1000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Audio file is too small. Please provide a longer sample.",
+        )
+    
+    # Forward to TTS service
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {"audio": (audio.filename, audio_data, "audio/wav")}
+            data = {"name": name.lower().replace(" ", "_")}
+            
+            response = await client.post(
+                f"{TTS_SERVICE_URL}/voices/clone",
+                files=files,
+                data=data,
+            )
+            
+            if response.status_code != 200:
+                logger.error("TTS service clone error", status=response.status_code, detail=response.text)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"TTS service error: {response.text}",
+                )
+            
+            tts_result = response.json()
+            
+    except httpx.ConnectError:
+        logger.error("Cannot connect to TTS service for cloning", url=TTS_SERVICE_URL)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="TTS service not available. Please try again later.",
+        )
+    
+    # Create voice profile in database
+    voice = VoiceProfile(
+        user_id=user.id,
+        name=name,
+        description=description,
+        language=language,
+        gender="neutral",  # Unknown for cloned voices
+        is_cloned=True,
+        is_default=False,
+        is_public=False,  # User's private cloned voice
+        sample_path=tts_result.get("path"),
+        config={
+            "speed": 1.0,
+            "pitch": 1.0,
+            "style": "conversational",
+            "emotion": "neutral",
+            "provider": "coqui"
+        }
+    )
+    
+    db.add(voice)
+    await db.flush()
+    
+    logger.info("Voice cloned successfully", voice_id=str(voice.id), name=name)
+    return VoiceResponse.model_validate(voice)
 
 
 # TTS generation endpoints

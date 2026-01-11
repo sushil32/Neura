@@ -302,17 +302,29 @@ export const ttsApi = {
     language?: string;
     gender?: string;
     sample_file?: File;
+    description?: string;
   }): Promise<Voice> => {
-    const formData = new FormData();
-    formData.append('name', data.name);
-    if (data.language) formData.append('language', data.language);
-    if (data.gender) formData.append('gender', data.gender);
-    if (data.sample_file) formData.append('sample_file', data.sample_file);
+    // Use clone endpoint when audio sample is provided
+    if (data.sample_file) {
+      const formData = new FormData();
+      formData.append('name', data.name);
+      formData.append('audio', data.sample_file);
+      if (data.language) formData.append('language', data.language);
+      if (data.description) formData.append('description', data.description);
 
-    const response = await api.post('/tts/voices', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+      const response = await api.post('/tts/voices/clone', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      return response.data;
+    }
+
+    // Create voice profile without cloning
+    const response = await api.post('/tts/voices', {
+      name: data.name,
+      language: data.language || 'en',
+      gender: data.gender || 'neutral',
     });
     return response.data;
   },

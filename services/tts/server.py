@@ -120,8 +120,11 @@ async def synthesize(request: SynthesizeRequest):
     logger.info("Synthesizing speech", text_length=len(request.text))
     
     try:
-        # Get voice sample path if using cloned voice
-        voice_sample = None
+        # For builtin voices, pass the voice_id directly so the engine can use
+        # internal XTTS speaker embeddings. For cloned voices, pass the WAV path.
+        voice_sample = request.voice_id or "default"
+        
+        # Check if it's a custom cloned voice with a WAV file
         if request.voice_id and request.voice_id != "default":
             voice_path = Path(f"/app/voices/{request.voice_id}.wav")
             if voice_path.exists():
@@ -160,7 +163,11 @@ async def synthesize_stream(request: SynthesizeRequest):
         raise HTTPException(status_code=503, detail="TTS engine not initialized")
     
     async def audio_generator():
-        voice_sample = None
+        # For builtin voices, pass the voice_id directly so the engine can use
+        # internal XTTS speaker embeddings. For cloned voices, pass the WAV path.
+        voice_sample = request.voice_id or "default"
+        
+        # Check if it's a custom cloned voice with a WAV file
         if request.voice_id and request.voice_id != "default":
             voice_path = Path(f"/app/voices/{request.voice_id}.wav")
             if voice_path.exists():
@@ -170,6 +177,8 @@ async def synthesize_stream(request: SynthesizeRequest):
             text=request.text,
             voice_sample=voice_sample,
             language=request.language,
+            speed=request.speed,
+            pitch=request.pitch,
         ):
             yield chunk
     
@@ -194,8 +203,10 @@ async def clone_voice(
         # Read audio data
         audio_data = await audio.read()
         
-        # Save voice sample
-        voice_path = Path(f"/app/voices/{name}.wav")
+        # Save voice sample to the voices directory relative to model path
+        voices_dir = Path(tts_engine.model_path).parent / "voices"
+        voices_dir.mkdir(parents=True, exist_ok=True)
+        voice_path = voices_dir / f"{name}.wav"
         voice_path.write_bytes(audio_data)
         
         # Create voice profile

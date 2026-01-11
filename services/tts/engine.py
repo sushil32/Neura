@@ -9,6 +9,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Tuple
 
 import numpy as np
 import structlog
+import subprocess
 
 logger = structlog.get_logger()
 
@@ -83,6 +84,7 @@ class TTSEngine:
         self._config = None
         self._initialized = False
         self._use_xtts = False
+        self.use_mastering = os.getenv("TTS_USE_MASTERING", "true").lower() == "true"
 
     def _detect_device(self, device: str) -> str:
         """Detect available compute device."""
@@ -174,12 +176,69 @@ class TTSEngine:
             self._use_xtts = False
             self._initialized = True
 
+    async def _ensure_voice_format(self, audio_path: str) -> str:
+        """
+        Ensure voice sample is in proper format for XTTS (24kHz mono WAV).
+        Converts from other formats (M4A, MP3, etc.) if needed.
+        """
+        import subprocess
+        
+        audio_path_obj = Path(audio_path)
+        
+        # Check if already converted
+        converted_path = audio_path_obj.parent / f"{audio_path_obj.stem}_converted.wav"
+        if converted_path.exists():
+            return str(converted_path)
+        
+        # Try to detect if conversion is needed using ffprobe
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "a:0",
+                 "-show_entries", "stream=sample_rate,codec_name",
+                 "-of", "csv=p=0", str(audio_path)],
+                capture_output=True, text=True, timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split(",")
+                codec = parts[0] if len(parts) > 0 else ""
+                sample_rate = int(parts[1]) if len(parts) > 1 else 0
+                
+                # If already 24kHz PCM WAV, use as-is
+                if codec == "pcm_s16le" and sample_rate == 24000:
+                    logger.info("Voice sample already in correct format", path=str(audio_path))
+                    return str(audio_path)
+            
+            # Convert to 24kHz mono WAV for optimal XTTS quality
+            logger.info("Converting voice sample to XTTS format", 
+                       source=str(audio_path), target=str(converted_path))
+            
+            convert_result = subprocess.run([
+                "ffmpeg", "-y", "-i", str(audio_path),
+                "-ar", "24000",  # 24kHz sample rate (XTTS native)
+                "-ac", "1",      # Mono
+                "-c:a", "pcm_s16le",  # 16-bit PCM
+                str(converted_path)
+            ], capture_output=True, timeout=60)
+            
+            if convert_result.returncode == 0 and converted_path.exists():
+                logger.info("Voice sample converted successfully", path=str(converted_path))
+                return str(converted_path)
+            else:
+                logger.warning("Voice conversion failed, using original", 
+                             error=convert_result.stderr.decode()[:200])
+                
+        except Exception as e:
+            logger.warning("Voice format check failed, using original", error=str(e))
+        
+        return str(audio_path)
+
     async def synthesize(
         self,
         text: str,
         voice_sample: Optional[str] = None,
         language: str = "en",
-        speed: float = 1.0,
+        speed: float = 1.3, # 1.3x is closer to natural human conversational pace in XTTS v2
         pitch: float = 1.0,
     ) -> TTSResult:
         """
@@ -207,7 +266,15 @@ class TTSEngine:
 
         if self._use_xtts and self._model:
             try:
-                return await self._synthesize_xtts(text, voice_sample, language, speed)
+                result = await self._synthesize_xtts(text, voice_sample, language, speed)
+                
+                # Apply mastering if enabled
+                if self.use_mastering:
+                    result.audio_data, new_duration = await self._post_process_audio(result.audio_data)
+                    if new_duration:
+                        result.duration = new_duration
+                
+                return result
             except Exception as e:
                 logger.error("XTTS synthesis failed, falling back", error=str(e))
                 return await self._synthesize_fallback(text, speed)
@@ -232,16 +299,53 @@ class TTSEngine:
         current_time = 0.0
         sample_rate = 24000  # XTTS default
         
-        # Get or create voice sample path
+        # Map builtin IDs to internal XTTS speaker embeddings (high quality)
+        BUILTIN_SPEAKER_MAPPING = {
+            "alex": "Damien Black",
+            "sarah": "Claribel Dervla",
+            "james": "Baldur Sanjin",
+            "emma": "Alison Dietlinde",
+            "david": "Viktor Eka",
+            "default": "Andrew Chipper",
+        }
+        
+        # Get or create voice sample path (for cloned voices)
         speaker_wav = voice_sample
-        if not speaker_wav or not Path(speaker_wav).exists():
-            # Use default voice sample
-            default_voice = Path(self.model_path) / "default_voice.wav"
-            if default_voice.exists():
-                speaker_wav = str(default_voice)
-            else:
-                # Create a simple default voice reference
-                speaker_wav = self._create_default_voice()
+        internal_speaker = None
+        
+        # If no path provided, check if it's a builtin ID
+        voice_id_lower = str(voice_sample).lower().replace(" ", "_") if voice_sample else "default"
+        
+        # Check if this is a builtin voice (use internal speaker)
+        if voice_id_lower in BUILTIN_SPEAKER_MAPPING:
+            internal_speaker = BUILTIN_SPEAKER_MAPPING[voice_id_lower]
+            speaker_wav = None  # Don't use cloning for builtins
+        else:
+            # Try to find cloned voice by name
+            cloned_voice_paths = [
+                Path(self.model_path).parent / "voices" / f"{voice_id_lower}.wav",
+                Path(self.model_path) / "voices" / f"{voice_id_lower}.wav",
+            ]
+            
+            found = False
+            for candidate_path in cloned_voice_paths:
+                if candidate_path.exists():
+                    speaker_wav = str(candidate_path)
+                    found = True
+                    logger.info("Found cloned voice", voice_id=voice_id_lower, path=speaker_wav)
+                    break
+            
+            if not found:
+                # Fallback to default voice
+                default_voice = Path(self.model_path) / "default_voice.wav"
+                if default_voice.exists():
+                    speaker_wav = str(default_voice)
+                else:
+                    speaker_wav = self._create_default_voice(voice_id_lower)
+        
+        # Convert audio to proper format for XTTS if needed (24kHz WAV)
+        if speaker_wav and Path(speaker_wav).exists():
+            speaker_wav = await self._ensure_voice_format(speaker_wav)
         
         for sentence in sentences:
             if not sentence.strip():
@@ -252,24 +356,31 @@ class TTSEngine:
                 tmp_path = tmp.name
             
             try:
-                # Run synthesis
-                self._model.tts_to_file(
-                    text=sentence,
-                    file_path=tmp_path,
-                    speaker_wav=speaker_wav,
-                    language=language,
-                    split_sentences=False,
-                )
+                # Run synthesis - use internal speaker for builtins, cloning for custom
+                if internal_speaker:
+                    self._model.tts_to_file(
+                        text=sentence,
+                        file_path=tmp_path,
+                        speaker=internal_speaker,
+                        language=language,
+                        split_sentences=False,
+                        speed=speed,
+                    )
+                else:
+                    self._model.tts_to_file(
+                        text=sentence,
+                        file_path=tmp_path,
+                        speaker_wav=speaker_wav,
+                        language=language,
+                        split_sentences=False,
+                        speed=speed,
+                    )
                 
                 # Read the generated audio
                 with wave.open(tmp_path, 'rb') as wav:
                     frames = wav.readframes(wav.getnframes())
                     audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
                     sample_rate = wav.getframerate()
-                
-                # Adjust speed if needed
-                if speed != 1.0:
-                    audio = self._change_speed(audio, sample_rate, speed)
                 
                 audio_chunks.append(audio)
                 
@@ -403,19 +514,19 @@ class TTSEngine:
         text: str,
         voice_sample: Optional[str] = None,
         language: str = "en",
+        speed: float = 1.0,
+        pitch: float = 1.0,
         chunk_size: int = 4096,
     ) -> AsyncGenerator[Tuple[bytes, List[WordTiming]], None]:
         """
-        Stream synthesized speech in chunks.
-        
-        Yields:
-            Tuple of (audio_chunk, word_timings_for_chunk)
+        Stream synthesized speech in chunks with full quality parity.
         """
         if not self._initialized:
             await self.initialize()
 
-        # For streaming, we synthesize the full audio then stream chunks
-        result = await self.synthesize(text, voice_sample, language)
+        # For streaming, we use the full synthesis logic (including speed and mastering)
+        # then stream the resulting bytes in chunks.
+        result = await self.synthesize(text, voice_sample, language, speed, pitch)
         
         # Stream in chunks
         audio_data = result.audio_data
@@ -556,28 +667,30 @@ class TTSEngine:
             indices = np.linspace(0, len(audio) - 1, new_length).astype(int)
             return audio[indices]
 
-    def _create_default_voice(self) -> str:
-        """Create a default voice sample for XTTS."""
-        # Generate a simple sine wave as placeholder
+    def _create_default_voice(self, voice_id: str = "default") -> str:
+        """Create a default voice sample for XTTS if the real one is missing."""
+        # Generate broadband noise with speech-like envelope
+        # This works much better than a sine wave for XTTS conditioning
         sample_rate = 22050
         duration = 3.0
-        t = np.linspace(0, duration, int(sample_rate * duration))
+        num_samples = int(sample_rate * duration)
         
-        # Generate speech-like audio
-        audio = np.sin(2 * np.pi * 200 * t) * 0.3
-        audio += np.sin(2 * np.pi * 400 * t) * 0.2
-        audio += np.sin(2 * np.pi * 800 * t) * 0.1
+        # Pink-ish noise
+        noise = np.random.normal(0, 0.5, num_samples)
         
-        # Add envelope
-        envelope = np.ones_like(audio)
-        attack = int(0.1 * sample_rate)
-        envelope[:attack] = np.linspace(0, 1, attack)
-        envelope[-attack:] = np.linspace(1, 0, attack)
-        audio *= envelope
+        # Apply speech-like envelope (rough syllables)
+        envelope = np.ones(num_samples)
+        for i in range(10):  # 10 rough syllables
+            start = np.random.randint(0, num_samples - 2000)
+            length = np.random.randint(4410, 8820)
+            envelope[start:start+length] *= np.random.uniform(1.5, 3.0)
+            
+        audio = noise * envelope
         
         # Save to temp file
-        voice_path = Path(self.model_path) / "default_voice.wav"
-        voice_path.parent.mkdir(parents=True, exist_ok=True)
+        voices_dir = Path(self.model_path) / "builtin_fallbacks"
+        voices_dir.mkdir(parents=True, exist_ok=True)
+        voice_path = voices_dir / f"{voice_id}_fallback.wav"
         
         audio_bytes = self._audio_to_bytes(audio.astype(np.float32), sample_rate)
         voice_path.write_bytes(audio_bytes)
@@ -604,6 +717,72 @@ class TTSEngine:
         
         return buffer.getvalue()
 
+    async def _post_process_audio(self, audio_bytes: bytes) -> Tuple[bytes, Optional[float]]:
+        """Apply FFmpeg mastering filters to audio bytes using temp files for header integrity."""
+        temp_in = None
+        temp_out = None
+        try:
+            # Create temp files
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_in:
+                f_in.write(audio_bytes)
+                temp_in = f_in.name
+            
+            temp_out = temp_in + ".mastered.wav"
+
+            # Filters:
+            # 1. highpass: Remove extreme low frequency rumble
+            # 2. loudnorm: EBU R128 loudness normalization
+            # 3. compand: Soft dynamic range compression for "fuller" sound
+            # 4. treble: Subtle boost for clarity
+            filters = (
+                "highpass=f=80, "
+                "loudnorm=I=-16:TP=-1.5:LRA=11, "
+                "compand=attacks=0:points=-30/-90|-20/-20|0/0, "
+                "treble=g=1.5:f=6000" # Adjusted for better clarity
+            )
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", temp_in,
+                "-af", filters,
+                "-ar", "24000",
+                temp_out
+            ]
+
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=True
+            )
+
+            # Read back
+            with open(temp_out, 'rb') as f_out:
+                mastered_bytes = f_out.read()
+
+            # Get new duration using ffprobe
+            duration = None
+            try:
+                probe_cmd = [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", temp_out
+                ]
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+                if probe_result.returncode == 0:
+                    duration = float(probe_result.stdout.strip())
+            except:
+                pass
+
+            return mastered_bytes, duration
+        except Exception as e:
+            logger.error("Post-processing encountered an error", error=str(e))
+            return audio_bytes, None
+        finally:
+            # Cleanup
+            for p in [temp_in, temp_out]:
+                if p and os.path.exists(p):
+                    try: os.unlink(p)
+                    except: pass
+
     def get_available_voices(self) -> List[Dict]:
         """Get list of available voice profiles."""
         # Built-in default voices using XTTS speaker embeddings
@@ -622,7 +801,7 @@ class TTSEngine:
                 "language": "en",
                 "type": "builtin",
                 "gender": "male",
-                "description": "Clear, professional male voice",
+                "description": "Conversational business male voice",
             },
             {
                 "id": "sarah",
@@ -630,15 +809,31 @@ class TTSEngine:
                 "language": "en",
                 "type": "builtin",
                 "gender": "female",
-                "description": "Warm, friendly female voice",
+                "description": "Friendly, tutorial-style female voice",
             },
             {
-                "id": "jordan",
-                "name": "Jordan",
+                "id": "james",
+                "name": "James",
                 "language": "en",
                 "type": "builtin",
-                "gender": "neutral",
-                "description": "Versatile, neutral voice",
+                "gender": "male",
+                "description": "Authoritative, deep male voice",
+            },
+            {
+                "id": "emma",
+                "name": "Emma",
+                "language": "en",
+                "type": "builtin",
+                "gender": "female",
+                "description": "Energetic marketing female voice",
+            },
+            {
+                "id": "david",
+                "name": "David",
+                "language": "en",
+                "type": "builtin",
+                "gender": "male",
+                "description": "Calm wellness male voice",
             },
         ]
         
