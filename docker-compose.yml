@@ -60,9 +60,11 @@ services:
       - .env.local
     environment:
       - TTS_SERVICE_URL=http://host.docker.internal:8001
+      - AVATAR_SERVICE_URL=http://host.docker.internal:8002
     volumes:
       - ./backend:/app
       - ./services:/app/services
+      - ./shared:/shared
     depends_on:
       postgres:
         condition: service_healthy
@@ -94,9 +96,13 @@ services:
     container_name: neura-celery-worker
     env_file:
       - .env.local
+    environment:
+      - TTS_SERVICE_URL=http://host.docker.internal:8001
+      - AVATAR_SERVICE_URL=http://host.docker.internal:8002
     volumes:
       - ./backend:/app
       - ./services:/app/services
+      - ./shared:/shared
     depends_on:
       postgres:
         condition: service_healthy
@@ -191,13 +197,15 @@ services:
       - .env.local
     volumes:
       - ./services/avatar:/app
-      - ./services/avatar/models:/app/models
       - ./services/avatar/avatars:/app/avatars
+      - ./services/avatar/models:/app/models
+      - ./shared:/shared
     ports:
       - "8002:8002"
     depends_on:
       redis:
         condition: service_healthy
+    command: uvicorn server:app --host 0.0.0.0 --port 8002 --reload
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health').read()" ]
@@ -222,5 +230,6 @@ volumes:
   voice_samples:
   avatar_models:
   avatar_images:
+    # shared_data: (Replaced by local bind mount ./shared)
 
 

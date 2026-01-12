@@ -189,12 +189,30 @@ async def generate_video(
             detail="Script is required for video generation",
         )
     
+    
     # Estimate credits using CreditManager
     estimated_credits = CreditManager.estimate_video_credits(
         script_length=len(video.script),
         resolution=data.resolution,
     )
     
+    # Handle Preview Mode
+    script_to_process = video.script
+    if data.preview:
+        # Truncate script for preview (first 15 words approx)
+        words = video.script.split()[:20]
+        script_to_process = " ".join(words)
+        
+        # Force lower settings for speed
+        data.resolution = "720p"
+        data.quality = "fast"
+        
+        # Minimal credit cost or free
+        estimated_credits = 0  # Free preview? Or small fee. 
+        # Let's make it free for now to encourage usage.
+        
+        logger.info("Generating preview", original_len=len(video.script), preview_len=len(script_to_process))
+
     # Check credits
     if user.credits < estimated_credits:
         raise HTTPException(
@@ -204,9 +222,9 @@ async def generate_video(
     
     # Check plan limits
     plan_limits = CreditManager.get_plan_limits(user.plan)
-    estimated_duration = len(video.script) / 15  # ~15 chars per second
+    estimated_duration = len(script_to_process) / 15  # ~15 chars per second
     
-    if estimated_duration > plan_limits.get("max_video_length", 60):
+    if estimated_duration > plan_limits.get("max_video_length", 60) and not data.preview:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Video too long for {user.plan} plan. Max: {plan_limits['max_video_length']}s",
@@ -222,15 +240,29 @@ async def generate_video(
             "quality": data.quality,
             "resolution": data.resolution,
             "avatar_id": str(video.avatar_id) if video.avatar_id else None,
+            "script": script_to_process if data.preview else None,
+            "preview": data.preview,
+            # Avatar settings
+            "emotion": data.emotion,
+            "expression_scale": data.expression_scale,
+            "head_pose_scale": data.head_pose_scale,
+            "use_sadtalker": data.use_sadtalker,
+            "voice_id": data.voice_id,
         },
         credits_estimated=estimated_credits,
     )
     db.add(job)
     await db.flush()
     
-    # Update video with settings
-    video.status = "queued"
-    video.resolution = data.resolution
+    # Update video with settings (ONLY if not preview, or update status is fine?)
+    # If preview, we shouldn't change the video main resolution/status permanently?
+    # Actually, preview is separate.
+    # But video_generation_task requires video status to be processing?
+    # No, it just updates it.
+    
+    if not data.preview:
+        video.status = "queued"
+        video.resolution = data.resolution
     
     await db.commit()
     
@@ -244,6 +276,7 @@ async def generate_video(
             video_id=str(video.id),
             job_id=str(job.id),
             task_id=task.id,
+            preview=data.preview,
         )
     except Exception as e:
         logger.error("Failed to queue Celery task", error=str(e))

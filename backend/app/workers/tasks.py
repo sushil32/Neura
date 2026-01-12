@@ -16,8 +16,82 @@ from app.workers.celery_app import celery_app
 logger = structlog.get_logger()
 
 # Service URLs
-TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001")
-AVATAR_SERVICE_URL = os.getenv("AVATAR_SERVICE_URL", "http://avatar-service:8002")
+# Service URLs
+TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", settings.tts_service_url)
+AVATAR_SERVICE_URL = os.getenv("AVATAR_SERVICE_URL", settings.avatar_service_url)
+
+
+
+import re
+
+def clean_text_for_tts(text: str) -> str:
+    """Clean text before sending to TTS service."""
+    if not text:
+        return ""
+        
+    # Remove timestamps/section headers like [0:00 - 0:10 | Hook]
+    text = re.sub(r'\[\d{1,2}:\d{2}.*?\]', '', text)
+    
+    # Remove visual cues like [VISUAL: ...]
+    text = re.sub(r'\[vis.*?\]', '', text, flags=re.IGNORECASE)
+    
+    # Remove standalone headers (e.g. "Title | Topic")
+    # Heuristic: line contains "|" and is short
+    lines = []
+    for line in text.split('\n'):
+        if '|' in line and len(line) < 100:
+            continue
+        lines.append(line)
+    text = '\n'.join(lines)
+    
+    # Replace [PAUSE] or similar tags with breaks
+    text = re.sub(r'\[pause.*?\]', '... ', text, flags=re.IGNORECASE)
+    
+    # Clean extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
+# Worker-safe database context that creates fresh engine per task
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+
+@asynccontextmanager
+async def get_worker_db():
+    """Create a fresh database session for Celery workers.
+    
+    This avoids the 'Future attached to different loop' error by creating
+    a new engine bound to the current event loop.
+    """
+    from app.config import settings
+    
+    # Create fresh engine for this event loop
+    engine = create_async_engine(
+        settings.db_url,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=5,
+    )
+    
+    session_maker = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    
+    async with session_maker() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+    
+    # Dispose engine after use
+    await engine.dispose()
 
 
 def run_async(coro):
@@ -160,6 +234,10 @@ async def call_avatar_service(
     width: int = 1920,
     height: int = 1080,
     fps: int = 30,
+    emotion: str = "neutral",
+    expression_scale: float = 1.0,
+    head_pose_scale: float = 1.0,
+    use_sadtalker: bool = True,
 ) -> Dict[str, Any]:
     """Call Avatar service to render video with retry logic."""
     max_retries = 3
@@ -194,6 +272,10 @@ async def call_avatar_service(
                         "width": width,
                         "height": height,
                         "fps": fps,
+                        "emotion": emotion,
+                        "expression_scale": expression_scale,
+                        "head_pose_scale": head_pose_scale,
+                        "use_sadtalker": use_sadtalker,
                     },
                 )
                 
@@ -242,7 +324,7 @@ async def wait_for_render(job_id: str, timeout: int = 600) -> Dict[str, Any]:
     """Wait for avatar render to complete."""
     start_time = datetime.utcnow()
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             elapsed = (datetime.utcnow() - start_time).total_seconds()
             if elapsed > timeout:
@@ -280,14 +362,15 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
     logger.info("Starting video generation", job_id=job_id)
     
     async def process():
-        from app.database import get_db_context
+        # Import inside function to avoid module-level async issues
         from app.models.job import Job
         from app.models.video import Video
         from app.models.user import User
         from app.utils.storage import storage_client
         from sqlalchemy import select
         
-        async with get_db_context() as db:
+        # Use worker-safe DB that creates fresh engine for this event loop
+        async with get_worker_db() as db:
             # Get job
             result = await db.execute(select(Job).where(Job.id == UUID(job_id)))
             job = result.scalar_one_or_none()
@@ -322,10 +405,24 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 if user and user.credits < estimated_credits:
                     raise ValueError(f"Insufficient credits. Required: {estimated_credits}, Available: {user.credits}")
                 
-                # Create temp directory
-                temp_dir = tempfile.mkdtemp()
-                audio_path = Path(temp_dir) / "audio.wav"
-                video_path = Path(temp_dir) / "output.mp4"
+                # Create temp directory in shared volume for communication with avatar service
+                # We added a shared volume at /shared in docker-compose
+                shared_root = Path("/shared")
+                if shared_root.exists():
+                    job_temp_dir = shared_root / "temp" / str(job_id)
+                    job_temp_dir.mkdir(parents=True, exist_ok=True)
+                    audio_path_for_avatar = f"/shared/temp/{job_id}/audio.wav"
+                else:
+                    # Fallback for local dev (no shared volume)
+                    # Use a temp dir that hopefully works or is absolute
+                    job_temp_dir = Path(tempfile.gettempdir()) / "neura_tasks" / str(job_id)
+                    job_temp_dir.mkdir(parents=True, exist_ok=True)
+                    audio_path_for_avatar = str(job_temp_dir / "audio.wav")
+                
+                audio_path = job_temp_dir / "audio.wav"
+                video_path = job_temp_dir / "output.mp4"
+                
+                logger.info("Using temp dir", path=str(job_temp_dir), audio_path_for_service=audio_path_for_avatar)
                 
                 # ========================================
                 # Step 1: Generate TTS Audio
@@ -334,12 +431,42 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 job.progress = 0.1
                 await db.commit()
                 
-                logger.info("Calling TTS service", video_id=video_id)
+                # Get script (allow override for preview)
+                script = job.input_data.get("script") or video.script
+                is_preview = job.input_data.get("preview", False)
+                
+                logger.info("Starting video generation", 
+                           video_id=video_id, 
+                           is_preview=is_preview,
+                           script_length=len(script),
+                           script_preview=script[:100] if script else None)
+                
+                if not script or len(script.strip()) == 0:
+                    raise ValueError("Script is empty or missing")
+                
+                # Detect emotion from script (for SadTalker)
+                emotion = job.input_data.get("emotion")  # User override
+                if not emotion:
+                    try:
+                        from app.utils.emotion import detect_emotion_from_text
+                        emotion = detect_emotion_from_text(script, use_ml=False)
+                        logger.info("Auto-detected emotion", emotion=emotion, script_preview=script[:50])
+                    except Exception as e:
+                        logger.warning("Emotion detection failed, using neutral", error=str(e))
+                        emotion = "neutral"
+                
+                logger.info("Calling TTS service", video_id=video_id, script_length=len(script))
                 
                 try:
+                    cleaned_script = clean_text_for_tts(script)
+                    logger.info("Cleaned script for TTS", 
+                               original_length=len(script),
+                               cleaned_length=len(cleaned_script),
+                               cleaned_preview=cleaned_script[:100])
+                    
                     tts_result = await call_tts_service(
-                        text=video.script,
-                        voice_id="default",  # Video model doesn't have voice_id
+                        text=cleaned_script,
+                        voice_id=job.input_data.get("voice_id", "default"),
                         language="en",
                         speed=1.0,
                     )
@@ -358,7 +485,7 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                     import wave
                     import struct
                     sample_rate = 22050
-                    duration = len(video.script) / 15  # ~15 chars per second
+                    duration = len(script) / 15  # ~15 chars per second
                     num_samples = int(sample_rate * duration)
                     
                     with wave.open(str(audio_path), 'wb') as wav_file:
@@ -370,7 +497,7 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                             wav_file.writeframes(struct.pack('<h', 0))
                     
                     # Create simple word timings
-                    words = video.script.split()
+                    words = script.split()
                     word_duration = duration / len(words) if words else duration
                     word_timings = []
                     current_time = 0.0
@@ -395,15 +522,23 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 job.progress = 0.4
                 await db.commit()
                 
-                logger.info("Calling Avatar service", video_id=video_id)
-                
-                # Get resolution
+                # Get resolution (from job input_data for previews, or from video record)
+                resolution = job.input_data.get("resolution") or video.resolution or "1080p"
                 resolution_map = {
                     "720p": (1280, 720),
                     "1080p": (1920, 1080),
                     "4k": (3840, 2160),
                 }
-                width, height = resolution_map.get(video.resolution, (1920, 1080))
+                width, height = resolution_map.get(resolution, (1920, 1080))
+                
+                logger.info("Preparing avatar render", 
+                           video_id=video_id,
+                           avatar_id=video.avatar_id,
+                           resolution=resolution,
+                           width=width,
+                           height=height,
+                           audio_file_exists=audio_path.exists(),
+                           audio_file_size=audio_path.stat().st_size if audio_path.exists() else 0)
                 
                 try:
                     # Start render job
@@ -411,14 +546,24 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                     # Convert UUID to string
                     avatar_id_str = str(video.avatar_id) if video.avatar_id else "default"
                     
+                    logger.info("Calling Avatar service", 
+                               render_job_id=render_job_id,
+                               avatar_id=avatar_id_str,
+                               audio_path_for_avatar=audio_path_for_avatar,
+                               emotion=emotion)
+                    
                     await call_avatar_service(
                         job_id=render_job_id,
                         avatar_id=avatar_id_str,
-                        audio_path=str(audio_path),
+                        audio_path=audio_path_for_avatar,
                         word_timings=word_timings,
                         width=width,
                         height=height,
                         fps=30,
+                        emotion=emotion,
+                        expression_scale=job.input_data.get("expression_scale", 1.0),
+                        head_pose_scale=job.input_data.get("head_pose_scale", 1.0),
+                        use_sadtalker=job.input_data.get("use_sadtalker", True),
                     )
                     
                     # Wait for render to complete
@@ -438,6 +583,11 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                     logger.info("Avatar render completed")
                     
                 except Exception as e:
+                    import traceback
+                    error_detail = traceback.format_exc()
+                    print(f"AVATAR SERVICE FAILED: {e}")
+                    print(error_detail)
+                    logger.error("Avatar service failed", error=str(e))
                     logger.warning("Avatar service unavailable, using fallback", error=str(e))
                     # Fallback: create a simple placeholder video using ffmpeg
                     # Create a black video with the audio
@@ -498,7 +648,10 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 # ========================================
                 # Step 4: Deduct Credits
                 # ========================================
-                if user:
+                # Check if this is a preview
+                is_preview = job.input_data.get("preview", False)
+                
+                if user and not is_preview:
                     credits_used = estimated_credits
                     user.credits -= credits_used
                     logger.info("Credits deducted", user_id=str(user.id), credits_used=credits_used)
@@ -506,12 +659,18 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 # ========================================
                 # Step 5: Update Records
                 # ========================================
-                video.status = "completed"
-                video.video_url = video_url
-                video.audio_url = audio_url
-                video.duration = audio_duration
-                video.completed_at = datetime.utcnow()
-                video.video_metadata = {
+                if is_preview:
+                    # For preview, only update preview_url, don't change main video status
+                    video.preview_url = video_url
+                    logger.info("Preview video generated", preview_url=video_url)
+                else:
+                    # For full video, update all fields
+                    video.status = "completed"
+                    video.video_url = video_url
+                    video.audio_url = audio_url
+                    video.duration = audio_duration
+                    video.completed_at = datetime.utcnow()
+                    video.video_metadata = {
                     "width": width,
                     "height": height,
                     "fps": 30,
@@ -523,16 +682,27 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 job.progress = 1.0
                 job.current_step = "Complete"
                 job.completed_at = datetime.utcnow()
-                job.result = {
-                    "video_url": video_url,
-                    "audio_url": audio_url,
-                    "duration": audio_duration,
-                }
-                job.credits_used = estimated_credits
+                
+                # Set job result with appropriate URL based on preview status
+                if is_preview:
+                    job.result = {
+                        "video_url": video_url,  # Frontend expects this field
+                        "preview_url": video_url,
+                        "audio_url": audio_url,
+                        "duration": audio_duration,
+                    }
+                else:
+                    job.result = {
+                        "video_url": video_url,
+                        "audio_url": audio_url,
+                        "duration": audio_duration,
+                    }
+                
+                job.credits_used = estimated_credits if not is_preview else 0
                 
                 await db.commit()
                 
-                logger.info("Video generation completed", job_id=job_id, video_id=video_id)
+                logger.info("Video generation completed", job_id=job_id, video_id=video_id, is_preview=is_preview)
                 return {"status": "completed", "video_url": video_url}
                 
             except Exception as e:
@@ -552,13 +722,14 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 raise
                 
             finally:
-                # Cleanup temp files
-                if temp_dir:
-                    import shutil
-                    try:
-                        shutil.rmtree(temp_dir)
-                    except:
-                        pass
+                # Cleanup temp directory
+                try:
+                    if 'job_temp_dir' in locals() and job_temp_dir.exists():
+                        import shutil
+                        shutil.rmtree(job_temp_dir)
+                        logger.info("Cleaned up temp directory", path=str(job_temp_dir))
+                except Exception as cleanup_error:
+                    logger.warning("Failed to cleanup temp directory", error=str(cleanup_error))
     
     try:
         return run_async(process())

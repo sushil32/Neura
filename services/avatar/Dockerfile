@@ -48,6 +48,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# PATCH: Fix basicsr incompatibility with torchvision 0.15+
+# basicsr imports 'functional_tensor' which was removed. We redirect it to 'functional'
+RUN sed -i 's/from torchvision.transforms.functional_tensor import rgb_to_grayscale/from torchvision.transforms.functional import rgb_to_grayscale/g' /usr/local/lib/python3.10/site-packages/basicsr/data/degradations.py || true
+
 # Copy application code
 COPY . .
 

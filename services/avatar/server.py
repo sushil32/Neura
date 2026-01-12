@@ -21,6 +21,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Configuration
+AVATAR_PATH = os.getenv("AVATAR_PATH", "/app/avatars")
+print(f"DEBUG: Startup AVATAR_PATH={AVATAR_PATH}")
+# Create avatar directory
+Path(AVATAR_PATH).mkdir(parents=True, exist_ok=True)
+
 # Global renderer instance
 avatar_renderer: Optional[AvatarRenderer] = None
 
@@ -39,6 +45,12 @@ class RenderRequest(BaseModel):
     fps: int = 30
     quality: str = "balanced"
     background_color: str = "#000000"
+    
+    # SadTalker emotion parameters
+    emotion: Optional[str] = "neutral"
+    expression_scale: float = 1.0
+    head_pose_scale: float = 1.0
+    use_sadtalker: bool = True  # False = fallback to Wav2Lip
 
 
 class RenderResponse(BaseModel):
@@ -67,9 +79,20 @@ async def startup():
     global avatar_renderer
     logger.info("Starting Avatar service")
     
+    # Determine model path
+    model_path = os.getenv("AVATAR_MODEL_PATH")
+    if not model_path:
+        # Check local models dir
+        local_models = Path(__file__).parent / "models"
+        if local_models.exists():
+            model_path = str(local_models)
+            logger.info(f"Detected local model path: {model_path}")
+        else:
+            model_path = "/app/models"
+            
     try:
         avatar_renderer = AvatarRenderer(
-            model_path=os.getenv("AVATAR_MODEL_PATH", "/app/models"),
+            model_path=model_path,
             device=os.getenv("AVATAR_DEVICE", "auto"),
         )
         await avatar_renderer.initialize()
@@ -79,11 +102,10 @@ async def startup():
         # Create renderer instance but mark as not initialized
         # This allows service to start and use fallback mechanisms
         avatar_renderer = AvatarRenderer(
-            model_path=os.getenv("AVATAR_MODEL_PATH", "/app/models"),
+            model_path=model_path,
             device=os.getenv("AVATAR_DEVICE", "auto"),
         )
         avatar_renderer._initialized = False
-
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -127,28 +149,101 @@ async def render_video(request: RenderRequest):
     logger.info("Starting render job", job_id=request.job_id)
     
     # Check avatar exists
-    avatar_path = Path(f"/app/avatars/{request.avatar_id}.png")
-    if not avatar_path.exists():
-        # Try jpg
-        avatar_path = Path(f"/app/avatars/{request.avatar_id}.jpg")
-        if not avatar_path.exists():
-            raise HTTPException(status_code=404, detail="Avatar not found")
+    # Check avatar exists
+    # Support both docker path and local path
+    avatar_paths = [
+        Path(f"/app/avatars/{request.avatar_id}.png"),
+        Path(f"/app/avatars/{request.avatar_id}.jpg"),
+        Path(f"avatars/{request.avatar_id}.png"),
+        Path(f"avatars/{request.avatar_id}.jpg"),
+        Path(f"services/avatar/avatars/{request.avatar_id}.png"),
+        Path(f"services/avatar/avatars/{request.avatar_id}.jpg"),
+    ]
     
-    # Download audio file
-    # In production, this would download from the audio_url
-    audio_path = Path(f"/app/temp/{request.job_id}_audio.wav")
+    avatar_path = None
+    for path in avatar_paths:
+        if path.exists():
+            avatar_path = path
+            break
+            
+    if not avatar_path:
+        # Fallback to absolute path search if simple relative failed
+        # This handles running from root or other dirs
+        root_dir = Path(__file__).parent.parent.parent
+        avatar_paths_abs = [
+            root_dir / f"services/avatar/avatars/{request.avatar_id}.png",
+            root_dir / f"services/avatar/avatars/{request.avatar_id}.jpg"
+        ]
+        for path in avatar_paths_abs:
+            if path.exists():
+                avatar_path = path
+                break
+
+    if not avatar_path:
+        debug_info = {
+            "cwd": os.getcwd(),
+            "checked_paths": [str(p.absolute()) for p in avatar_paths],
+            "abs_checked": [str(p) for p in avatar_paths_abs]
+        }
+        logger.error("Avatar lookup failed", **debug_info)
+        raise HTTPException(status_code=404, detail=f"Avatar not found: {request.avatar_id}. Debug: {debug_info}")
     
-    # Create output path
-    output_path = Path(f"/app/temp/{request.job_id}_output.mp4")
-    
-    # Create render config
-    config = RenderConfig(
-        width=request.width,
-        height=request.height,
-        fps=request.fps,
-        quality=request.quality,
-        background_color=request.background_color,
-    )
+    # Setup temp directory
+    try:
+        temp_dir = Path("temp")
+        temp_dir.mkdir(exist_ok=True)
+        print(f"DEBUG: Temp dir created at {temp_dir.absolute()}")
+
+        # Download/Copy audio file
+        audio_source = request.audio_url
+        audio_path = temp_dir / f"{request.job_id}_audio.wav"
+        
+        import shutil
+        
+        if audio_source.startswith("http"):
+             # Download from URL using urllib (standard lib)
+             import urllib.request
+             print(f"DEBUG: Downloading audio from {audio_source}")
+             urllib.request.urlretrieve(audio_source, str(audio_path))
+        else:
+            # Assume local path
+            source_path = Path(audio_source)
+            
+            # Map /shared paths if running locally
+            shared_path_env = os.getenv("SHARED_PATH")
+            if shared_path_env and str(source_path).startswith("/shared"):
+                # Replace prefix /shared with actual local path
+                rel_path = str(source_path)[len("/shared"):]
+                if rel_path.startswith("/"): rel_path = rel_path[1:]
+                source_path = Path(shared_path_env) / rel_path
+                print(f"DEBUG: Mapped path {audio_source} to {source_path}")
+            
+            print(f"DEBUG: Copying audio from {source_path}")
+            if not source_path.exists():
+                raise HTTPException(status_code=400, detail=f"Audio file not found at {source_path}")
+            shutil.copy(source_path, audio_path)
+        
+        # Create output path
+        output_path = temp_dir / f"{request.job_id}_output.mp4"
+        
+        # Create render config
+        config = RenderConfig(
+            width=request.width,
+            height=request.height,
+            fps=request.fps,
+            quality=request.quality,
+            background_color=request.background_color,
+            # SadTalker config
+            emotion=request.emotion,
+            expression_scale=request.expression_scale,
+            head_pose_scale=request.head_pose_scale,
+            use_sadtalker=request.use_sadtalker,
+        )
+    except Exception as e:
+        print(f"CRITICAL ERROR in render_video setup: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Setup failed: {str(e)}")
     
     # Progress callback
     async def progress_callback(progress: RenderProgress):
@@ -208,6 +303,7 @@ async def _render_video_task(
             current_step="Failed",
             progress=0,
             estimated_remaining=0,
+            error=str(e)
         )
 
 
@@ -226,14 +322,15 @@ async def get_render_status(job_id: str):
         "current_step": progress.current_step,
         "progress": progress.progress,
         "estimated_remaining": progress.estimated_remaining,
-        "status": "completed" if progress.progress >= 1.0 else "processing",
+        "status": "failed" if progress.error or progress.current_step == "Failed" else ("completed" if progress.progress >= 1.0 else "processing"),
+        "error": progress.error
     }
 
 
 @app.get("/render/{job_id}/download")
 async def download_render(job_id: str):
     """Download completed render."""
-    output_path = Path(f"/app/temp/{job_id}_output.mp4")
+    output_path = Path(f"temp/{job_id}_output.mp4")
     
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
@@ -261,7 +358,8 @@ async def upload_avatar(
     try:
         # Read and save image
         image_data = await image.read()
-        avatar_path = Path(f"/app/avatars/{avatar_id}{ext}")
+        avatar_path = Path(AVATAR_PATH) / f"{avatar_id}{ext}"
+        print(f"DEBUG: Saving avatar to {avatar_path}")
         avatar_path.write_bytes(image_data)
         
         return AvatarUploadResponse(
@@ -276,7 +374,7 @@ async def upload_avatar(
 @app.get("/avatars")
 async def list_avatars():
     """List available avatars."""
-    avatars_dir = Path("/app/avatars")
+    avatars_dir = Path(AVATAR_PATH)
     avatars = []
     
     if avatars_dir.exists():
@@ -304,7 +402,7 @@ async def delete_avatar(avatar_id: str):
     """Delete an avatar."""
     # Try different extensions
     for ext in [".png", ".jpg", ".jpeg"]:
-        avatar_path = Path(f"/app/avatars/{avatar_id}{ext}")
+        avatar_path = Path(AVATAR_PATH) / f"{avatar_id}{ext}"
         if avatar_path.exists():
             avatar_path.unlink()
             return {"status": "deleted", "avatar_id": avatar_id}

@@ -56,23 +56,24 @@ class VideoResponse(BaseModel):
     user_id: UUID
     avatar_id: Optional[UUID]
     title: str
-    description: Optional[str]
+    description: Optional[str] = None
     type: str
     status: str
-    script: Optional[str]
-    prompt: Optional[str]
-    video_url: Optional[str]
-    thumbnail_url: Optional[str]
-    audio_url: Optional[str]
-    duration: Optional[int]
-    resolution: Optional[str]
-    file_size: Optional[int]
-    video_metadata: Optional[Dict[str, Any]]
-    error_message: Optional[str]
+    script: Optional[str] = None
+    prompt: Optional[str] = None
+    video_url: Optional[str] = None
+    preview_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    audio_url: Optional[str] = None
+    duration: Optional[int] = None
+    resolution: Optional[str] = None
+    file_size: Optional[int] = None
+    video_metadata: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
     credits_used: int
     created_at: datetime
     updated_at: datetime
-    completed_at: Optional[datetime]
+    completed_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -82,6 +83,14 @@ class VideoGenerateRequest(BaseModel):
 
     quality: str = Field(default="balanced", pattern="^(fast|balanced|high)$")
     resolution: str = Field(default="1080p", pattern="^(720p|1080p|4k)$")
+    preview: bool = False
+    
+    # Avatar settings (SadTalker)
+    emotion: Optional[str] = Field(default=None, pattern="^(neutral|happy|sad|angry|surprised)$")
+    expression_scale: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
+    head_pose_scale: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
+    use_sadtalker: bool = True  # False = fallback to Wav2Lip
+    voice_id: Optional[str] = "default"
 
 
 class VideoGenerateResponse(BaseModel):
