@@ -293,7 +293,10 @@ async def call_avatar_service(
                         continue
                     raise Exception(f"Avatar service unavailable after {max_retries} attempts: {response.text}")
                 else:
-                    raise Exception(f"Avatar service error ({response.status_code}): {response.text}")
+                    # Capture full error text
+                    error_text = response.text
+                    logger.error("Avatar service error", status=response.status_code, response=error_text)
+                    raise Exception(f"Avatar service error ({response.status_code}): {error_text}")
                     
         except httpx.TimeoutException:
             if attempt < max_retries - 1:
@@ -342,7 +345,9 @@ async def wait_for_render(job_id: str, timeout: int = 600) -> Dict[str, Any]:
             if status["status"] == "completed":
                 return status
             elif status["current_step"] == "Failed":
-                raise Exception("Render failed")
+                error_msg = status.get("error", "Unknown error")
+                logger.error("Render failed during wait", error=error_msg, job_id=job_id)
+                raise Exception(f"Render failed: {error_msg}")
             
             await asyncio.sleep(2)
 
@@ -543,8 +548,9 @@ def video_generation_task(self, job_id: str) -> Dict[str, Any]:
                 try:
                     # Start render job
                     render_job_id = f"{job_id}_render"
-                    # Convert UUID to string
-                    avatar_id_str = str(video.avatar_id) if video.avatar_id else "default"
+                    # Convert UUID to string - Prioritize job input (runtime selection) over video record
+                    job_avatar_id = job.input_data.get("avatar_id")
+                    avatar_id_str = job_avatar_id if job_avatar_id else (str(video.avatar_id) if video.avatar_id else "default")
                     
                     logger.info("Calling Avatar service", 
                                render_job_id=render_job_id,
@@ -778,11 +784,11 @@ def cleanup_expired_sessions():
     logger.info("Cleaning up expired sessions")
     
     async def cleanup():
-        from app.database import get_db_context
+        # Use worker-safe DB to avoid loop mismatch
         from app.models.user import Session
         from sqlalchemy import delete
         
-        async with get_db_context() as db:
+        async with get_worker_db() as db:
             # Delete expired sessions
             result = await db.execute(
                 delete(Session).where(Session.expires_at < datetime.utcnow())
@@ -802,11 +808,11 @@ def process_pending_jobs():
     logger.info("Processing pending jobs")
     
     async def process():
-        from app.database import get_db_context
+        # Use worker-safe DB to avoid loop mismatch
         from app.models.job import Job
         from sqlalchemy import select
         
-        async with get_db_context() as db:
+        async with get_worker_db() as db:
             # Find stuck jobs (pending for more than 5 minutes)
             cutoff = datetime.utcnow() - timedelta(minutes=5)
             result = await db.execute(

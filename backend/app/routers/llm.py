@@ -60,6 +60,8 @@ class ScriptGenerateRequest(BaseModel):
     type: str = Field(default="explainer", pattern="^(explainer|training|marketing|presentation)$")
     duration: int = Field(default=60, ge=15, le=600)  # seconds
     tone: str = Field(default="professional", pattern="^(professional|casual|friendly|formal)$")
+    audience: Optional[str] = Field(default="general audience", max_length=100)
+    platform: Optional[str] = Field(default="generic", max_length=50)
     additional_instructions: Optional[str] = None
 
 
@@ -178,24 +180,82 @@ async def complete(
         )
 
 
+@router.post("/script/generate/stream")
+async def generate_script_stream(
+    data: ScriptGenerateRequest,
+    user: User = Depends(get_current_active_user),
+) -> StreamingResponse:
+    """Stream a video script generation using AI."""
+    from services.llm.provider import get_llm_provider
+    
+    # Build prompt for script generation
+    system_prompt = f"""You are a professional video script writer. Generate a {data.type} video script.
+Target Audience: {data.audience}
+Platform: {data.platform}
+
+Guidelines:
+- Target duration: {data.duration} seconds (approx {data.duration * 2} words)
+- Tone: {data.tone}
+- Style: Conversational, engaging, suitable for an AI avatar
+- Structure: Clear hook, body, and CTA
+- Formatting:
+  - Dialogue: Plain text
+  - Pauses: [PAUSE]
+  - Visual Cues: [VISUAL: description] (Use these to suggest camera angles or on-screen graphics)
+
+Strictly output the script content only."""
+
+    if data.additional_instructions:
+        system_prompt += f"\n\nAdditional instructions: {data.additional_instructions}"
+    
+    async def generate() -> AsyncGenerator[str, None]:
+        try:
+            provider = get_llm_provider()
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Generate a script about: {data.topic}"},
+            ]
+            
+            async for chunk in provider.chat_stream(
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2048,
+            ):
+                yield f"data: {chunk}\n\n"
+            
+            yield "data: [DONE]\n\n"
+            
+        except Exception as e:
+            logger.error("Script stream error", error=str(e))
+            yield f"data: [ERROR] {str(e)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.post("/script/generate", response_model=ScriptGenerateResponse)
 async def generate_script(
     data: ScriptGenerateRequest,
     user: User = Depends(get_current_active_user),
 ) -> ScriptGenerateResponse:
-    """Generate a video script using AI."""
+    """Generate a video script using AI (Synchronous fallback)."""
     from services.llm.provider import get_llm_provider
     
     # Build prompt for script generation
     system_prompt = f"""You are a professional video script writer. Generate a {data.type} video script.
+Target Audience: {data.audience}
+Platform: {data.platform}
 
 Guidelines:
-- Target duration: {data.duration} seconds (approximately {data.duration * 2} words)
+- Target duration: {data.duration} seconds (approx {data.duration * 2} words)
 - Tone: {data.tone}
-- Write in a conversational style suitable for an AI avatar presenter
-- Include natural pauses indicated by [PAUSE]
-- Do not include stage directions or visual cues
-- Focus on clear, engaging content"""
+- Included: [PAUSE], [VISUAL: ...]"""
 
     if data.additional_instructions:
         system_prompt += f"\n\nAdditional instructions: {data.additional_instructions}"
@@ -214,7 +274,7 @@ Guidelines:
         
         script = response.get("content", "")
         word_count = len(script.split())
-        estimated_duration = word_count // 2  # ~120 words per minute
+        estimated_duration = word_count // 2
         
         return ScriptGenerateResponse(
             script=script,

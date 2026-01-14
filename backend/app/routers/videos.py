@@ -199,13 +199,13 @@ async def generate_video(
     # Handle Preview Mode
     script_to_process = video.script
     if data.preview:
-        # Truncate script for preview (first 15 words approx)
-        words = video.script.split()[:20]
+        # Truncate script for preview (first 50 words approx)
+        words = video.script.split()[:50]
         script_to_process = " ".join(words)
         
-        # Force lower settings for speed
-        data.resolution = "720p"
-        data.quality = "fast"
+        # Force lower settings for speed (but keep 1080p for stability with SadTalker)
+        data.resolution = "1080p"
+        data.quality = "balanced"
         
         # Minimal credit cost or free
         estimated_credits = 0  # Free preview? Or small fee. 
@@ -239,7 +239,8 @@ async def generate_video(
             "video_id": str(video.id),
             "quality": data.quality,
             "resolution": data.resolution,
-            "avatar_id": str(video.avatar_id) if video.avatar_id else None,
+            # Prioritize runtime avatar selection, fallback to video record
+            "avatar_id": data.avatar_id if data.avatar_id else (str(video.avatar_id) if video.avatar_id else None),
             "script": script_to_process if data.preview else None,
             "preview": data.preview,
             # Avatar settings

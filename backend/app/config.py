@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # TTS
     tts_provider: str = "neura"
     tts_model_path: str = "/app/models/tts"
+    tts_service_url: str = "http://localhost:8001"
 
     # Avatar Service
     avatar_service_url: str = "http://localhost:8002"

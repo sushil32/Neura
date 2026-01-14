@@ -16,6 +16,7 @@ export interface Video {
   script: string | null;
   prompt: string | null;
   video_url: string | null;
+  preview_url: string | null;
   thumbnail_url: string | null;
   audio_url: string | null;
   duration: number | null;
@@ -37,6 +38,15 @@ export interface VideoListResponse {
 export interface VideoGenerateRequest {
   quality?: 'fast' | 'balanced' | 'high';
   resolution?: '720p' | '1080p' | '4k';
+  preview?: boolean;
+  // Avatar Settings
+  emotion?: 'neutral' | 'happy' | 'sad' | 'angry' | 'surprised';
+  expression_scale?: number;
+  head_pose_scale?: number;
+  enhancer?: string;
+  preprocess?: 'crop' | 'resize' | 'full' | 'extfull' | 'extcrop';
+  voice_id?: string;
+  avatar_id?: string;
 }
 
 export interface VideoGenerateResponse {

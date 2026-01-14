@@ -51,7 +51,7 @@ class SadTalkerRenderer:
             checkpoint_dir = self.model_path / "checkpoints"
             config_dir = SADTALKER_SRC / "src" / "config"
             
-            self.sadtalker_paths = init_path(str(checkpoint_dir), str(config_dir), self.resolution, False, 'crop')
+            self.sadtalker_paths = init_path(str(checkpoint_dir), str(config_dir), self.resolution, False, 'full')
             self.preprocess_model = CropAndExtract(self.sadtalker_paths, self.device)
             self.audio_to_coeff = Audio2Coeff(self.sadtalker_paths, self.device)
             self.animate_from_coeff = AnimateFromCoeff(self.sadtalker_paths, self.device)
@@ -62,10 +62,10 @@ class SadTalkerRenderer:
             logger.error("Failed to initialize SadTalker", error=str(e))
             raise RuntimeError(f"SadTalker initialization failed: {e}")
     
-    async def render(self, avatar_image: np.ndarray, audio_path: str, emotion: str = "neutral", expression_scale: float = 1.0, head_pose_scale: float = 1.0, output_path: Optional[str] = None) -> str:
+    async def render(self, avatar_image: np.ndarray, audio_path: str, emotion: str = "neutral", expression_scale: float = 1.0, head_pose_scale: float = 1.0, output_path: Optional[str] = None, enhancer: str = "gfpgan", preprocess: str = "full", still: bool = True) -> str:
         if not self._initialized: await self.initialize()
         
-        logger.info("Rendering with SadTalker", emotion=emotion)
+        logger.info("Rendering with SadTalker", emotion=emotion, enhancer=enhancer, preprocess=preprocess, still=still)
         from src.generate_batch import get_data
         from src.generate_facerender_batch import get_facerender_data
         
@@ -79,18 +79,19 @@ class SadTalkerRenderer:
             # Preprocess
             first_frame_dir = os.path.join(save_dir, 'first_frame_dir')
             os.makedirs(first_frame_dir, exist_ok=True)
-            first_coeff_path, crop_pic_path, crop_info = self.preprocess_model.generate(pic_path, first_frame_dir, 'crop', True, self.resolution)
+            # Use same preprocess mode for extraction
+            first_coeff_path, crop_pic_path, crop_info = self.preprocess_model.generate(pic_path, first_frame_dir, preprocess, True, self.resolution)
             if first_coeff_path is None: raise RuntimeError("Failed to extract coeffs")
 
             # Run blocking inference in a separate thread to avoid blocking the event loop
             def run_inference():
                 # Audio to Coeff
-                batch = get_data(first_coeff_path, audio_path, self.device, ref_eyeblink_coeff_path=None, still=False)
+                batch = get_data(first_coeff_path, audio_path, self.device, ref_eyeblink_coeff_path=None, still=still)
                 coeff_path = self.audio_to_coeff.generate(batch, save_dir, 0, None)
 
                 # Render
-                data = get_facerender_data(coeff_path, crop_pic_path, first_coeff_path, audio_path, 1, None, None, None, expression_scale, False, 'crop', self.resolution)
-                return self.animate_from_coeff.generate(data, save_dir, pic_path, crop_info, None, None, 'crop', self.resolution)
+                data = get_facerender_data(coeff_path, crop_pic_path, first_coeff_path, audio_path, 1, None, None, None, expression_scale, still, preprocess, self.resolution)
+                return self.animate_from_coeff.generate(data, save_dir, pic_path, crop_info, enhancer, None, preprocess, self.resolution)
 
             import asyncio
             loop = asyncio.get_running_loop()

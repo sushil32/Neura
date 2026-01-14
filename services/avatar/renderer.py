@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
 import structlog
+
+from models_wav2lip import Wav2Lip
 
 logger = structlog.get_logger()
 
@@ -26,6 +29,12 @@ class RenderConfig:
     background_image: Optional[str] = None
     output_format: str = "mp4"
     codec: str = "h264"
+    
+    # SadTalker config
+    emotion: str = "neutral"
+    expression_scale: float = 1.0
+    head_pose_scale: float = 1.0
+    use_sadtalker: bool = True
 
 
 @dataclass
@@ -46,6 +55,7 @@ class RenderProgress:
     current_step: str
     progress: float  # 0.0 to 1.0
     estimated_remaining: float  # seconds
+    error: Optional[str] = None
 
 
 class Wav2LipProcessor:
@@ -85,15 +95,29 @@ class Wav2LipProcessor:
         else:
             self._device = device
         
+        # Verify the selected device actually works
+        if self._device != "cpu":
+            try:
+                import torch
+                if self._device == "cuda":
+                    torch.zeros(1).to("cuda")
+                elif self._device == "mps":
+                    torch.zeros(1).to("mps")
+            except Exception:
+                logger.warning(f"Device {self._device} not working/linked, falling back to CPU")
+                self._device = "cpu"
+        
         logger.info(f"Using device: {self._device}")
         
         try:
             # Try to load Wav2Lip model
             await self._load_wav2lip_model()
             await self._load_face_detector()
-            self._initialized = True
+            print(f"✅ Wav2Lip initialized successfully on {self._device}")
             logger.info("Wav2Lip initialized successfully")
+            self._initialized = True
         except Exception as e:
+            print(f"❌ Failed to load Wav2Lip: {e}")
             logger.warning(f"Failed to load Wav2Lip: {e}, using fallback")
             self._initialized = True
     
@@ -111,9 +135,21 @@ class Wav2LipProcessor:
             
             if model_file.exists():
                 # Load model architecture and weights
-                # In production: self._model = Wav2Lip().to(self._device)
-                # self._model.load_state_dict(torch.load(model_file))
-                logger.info("Wav2Lip model loaded")
+                self._model = Wav2Lip()
+                
+                checkpoint = torch.load(model_file, map_location='cpu')
+                s = checkpoint.get('state_dict', checkpoint)
+                
+                # Strip unnecessary prefixes if any
+                new_s = {}
+                for k, v in s.items():
+                    new_s[k.replace('module.', '')] = v
+                
+                self._model.load_state_dict(new_s)
+                self._model = self._model.to(self._device)
+                self._model.eval()
+                
+                logger.info("Wav2Lip model loaded", device=self._device)
         except ImportError:
             logger.warning("PyTorch not available")
     
@@ -131,23 +167,44 @@ class Wav2LipProcessor:
     
     async def _download_model(self, model_path: Path) -> None:
         """Download Wav2Lip model weights."""
-        model_url = "https://github.com/Rudrabha/Wav2Lip/releases/download/v1.0/wav2lip_gan.pth"
-        logger.info(f"Downloading Wav2Lip model from {model_url}")
+        # Helper for SSL context on Mac
+        import ssl
+        try:
+             ssl._create_default_https_context = ssl._create_unverified_context
+        except AttributeError:
+             pass
+
+        model_urls = [
+            "https://huggingface.co/camenduru/Wav2Lip/resolve/main/checkpoints/wav2lip_gan.pth",
+            "https://huggingface.co/gvecchio/Wav2Lip-GAN/resolve/main/wav2lip_gan.pth",
+            "https://github.com/Rudrabha/Wav2Lip/releases/download/v1.0/wav2lip_gan.pth"
+        ]
         
         try:
-            import httpx
-            
+            import urllib.request
             model_path.parent.mkdir(parents=True, exist_ok=True)
             
-            async with httpx.AsyncClient() as client:
-                response = await client.get(model_url, follow_redirects=True)
-                if response.status_code == 200:
-                    model_path.write_bytes(response.content)
-                    logger.info("Wav2Lip model downloaded")
-                else:
-                    logger.warning(f"Failed to download model: {response.status_code}")
+            success = False
+            for url in model_urls:
+                try:
+                    print(f"Downloading model from {url}...")
+                    urllib.request.urlretrieve(url, str(model_path))
+                    
+                    if model_path.exists() and model_path.stat().st_size > 1000000: # > 1MB
+                        logger.info(f"Wav2Lip model downloaded from {url}")
+                        success = True
+                        break
+                    else:
+                        logger.warning(f"Download from {url} resulted in invalid file")
+                        if model_path.exists(): model_path.unlink()
+                except Exception as down_err:
+                    logger.warning(f"Failed to download from {url}: {down_err}")
+            
+            if not success:
+                logger.error("All model download attempts failed")
+                
         except Exception as e:
-            logger.warning(f"Model download failed: {e}")
+            logger.warning(f"Model download process failed: {e}")
     
     async def process_frame(
         self,
@@ -177,6 +234,7 @@ class Wav2LipProcessor:
             # Detect face
             faces = await self._detect_faces(face_image)
             if not faces:
+                print("⚠️ No face detected")
                 return face_image
             
             # Get the main face
@@ -188,33 +246,65 @@ class Wav2LipProcessor:
             
             # Resize for model
             face_resized = cv2.resize(face_crop, (96, 96))
+
+            # Prepare input tensor (6 channels: Identity + Masked Target)
+            # For simplicity, we use same face as identity and target
+            # and mask the bottom half of the target face
+            face_identity = face_resized.copy()
+            face_target = face_resized.copy()
+            face_target[96//2:, :] = 0 # Mask mouth area
             
-            # Prepare input tensor
-            face_tensor = torch.FloatTensor(face_resized).permute(2, 0, 1).unsqueeze(0)
+            # Concatenate on channel dimension
+            face_combined = np.concatenate([face_target, face_identity], axis=2)
+            face_tensor = torch.FloatTensor(face_combined).permute(2, 0, 1).unsqueeze(0)
             face_tensor = face_tensor.to(self._device) / 255.0
+            
+            print(f"🔹 Face tensor shape: {face_tensor.shape}, device: {self._device}")
             
             # Get mel spectrogram if not provided
             if mel_chunk is None:
                 mel_chunk = await self._audio_to_mel(audio_chunk)
             
-            mel_tensor = torch.FloatTensor(mel_chunk).unsqueeze(0).to(self._device)
+            print(f"🔹 Mel chunk shape: {mel_chunk.shape}")
+            
+            # Wav2Lip expects [B, 1, 80, 16]
+            if mel_chunk.ndim == 2:
+                # [80, 16] -> [1, 1, 80, 16]
+                mel_tensor = torch.FloatTensor(mel_chunk).unsqueeze(0).unsqueeze(0)
+            elif mel_chunk.ndim == 3:
+                # [1, 80, 16] -> [1, 1, 80, 16]
+                mel_tensor = torch.FloatTensor(mel_chunk).unsqueeze(1)
+            else:
+                mel_tensor = torch.FloatTensor(mel_chunk)
+            
+            mel_tensor = mel_tensor.to(self._device)
+            
+            print(f"🔹 Mel tensor shape: {mel_tensor.shape}, device: {self._device}")
             
             # Run inference
+            self._model.eval() # Force eval mode just in case
+            print(f"🔹 Running Wav2Lip inference...")
             with torch.no_grad():
                 output = self._model(mel_tensor, face_tensor)
             
+            print(f"🔹 Output shape: {output.shape}")
+            
             # Post-process output
             output_face = output.squeeze().permute(1, 2, 0).cpu().numpy()
-            output_face = (output_face * 255).astype(np.uint8)
+            output_face = (np.clip(output_face, 0, 1) * 255).astype(np.uint8)
             
             # Resize back and paste
             output_face = cv2.resize(output_face, (w, h))
             result = face_image.copy()
             result[y:y+h, x:x+w] = output_face
             
+            print("✅ Frame processed successfully")
             return result
             
         except Exception as e:
+            import traceback
+            print(f"❌ Frame processing failed: {e}")
+            print(traceback.format_exc())
             logger.warning(f"Frame processing failed: {e}")
             return face_image
     
@@ -237,9 +327,27 @@ class Wav2LipProcessor:
             return [(w//4, h//4, w//2, h//2)]
     
     async def _audio_to_mel(self, audio: np.ndarray, sr: int = 16000) -> np.ndarray:
-        """Convert audio to mel spectrogram."""
+        """Convert audio to mel spectrogram.
+        
+        Wav2Lip expects mel spectrograms of shape (80, 16) which corresponds to:
+        - 16 mel frames * 200 hop_size = 3200 samples
+        - At 16kHz, 3200 samples = 200ms = 0.2 seconds per video frame
+        """
         try:
             import librosa
+            
+            # Wav2Lip standard: 16 mel frames per video frame
+            mel_step_size = 16
+            
+            # Ensure we have exactly the right amount of audio
+            # hop_size=200, so 16 frames = 16*200 = 3200 samples
+            required_samples = mel_step_size * 200
+            
+            # Pad or trim audio to required length
+            if len(audio) < required_samples:
+                audio = np.pad(audio, (0, required_samples - len(audio)), mode='constant')
+            else:
+                audio = audio[:required_samples]
             
             mel = librosa.feature.melspectrogram(
                 y=audio.astype(np.float32),
@@ -247,11 +355,19 @@ class Wav2LipProcessor:
                 n_mels=80,
                 n_fft=800,
                 hop_length=200,
+                win_length=800,
             )
-            mel = np.log(mel + 1e-8)
+            
+            # Take exactly 16 frames
+            mel = mel[:, :mel_step_size]
+            
+            # Log scale
+            mel = np.log(np.clip(mel, 1e-5, None))
+            
             return mel
-        except:
-            # Return placeholder
+        except Exception as e:
+            logger.warning(f"Mel spectrogram generation failed: {e}")
+            # Return placeholder with correct shape
             return np.zeros((80, 16), dtype=np.float32)
 
 
@@ -275,23 +391,40 @@ class AvatarRenderer:
         self.model_path = model_path or os.getenv("AVATAR_MODEL_PATH", "/app/models")
         self.device = self._detect_device(device)
         self._wav2lip = None
+        self._sadtalker = None
         self._initialized = False
 
     def _detect_device(self, device: str) -> str:
         """Detect available compute device."""
-        if device != "auto":
-            return device
+        selected_device = device
         
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return "cuda"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
-        except ImportError:
-            pass
+        if selected_device == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    selected_device = "cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    selected_device = "mps"
+                else:
+                    selected_device = "cpu"
+            except ImportError:
+                selected_device = "cpu"
         
-        return "cpu"
+        # Verify the selected device actually works
+        if selected_device != "cpu":
+            try:
+                import torch
+                if selected_device == "cuda":
+                    torch.zeros(1).to("cuda")
+                elif selected_device == "mps":
+                    torch.zeros(1).to("mps")
+            except Exception as e:
+                print(f"⚠️ Device {selected_device} not working/linked ({e}), falling back to CPU")
+                logger.warning(f"Device {selected_device} not working/linked, falling back to CPU")
+                selected_device = "cpu"
+        
+        print(f"🔹 Final selected device: {selected_device}")
+        return selected_device
 
     async def initialize(self) -> None:
         """Initialize avatar rendering models."""
@@ -305,7 +438,22 @@ class AvatarRenderer:
             self._wav2lip = Wav2LipProcessor(self.model_path)
             await self._wav2lip.initialize(self.device)
             
+            # Initialize SadTalker processor
+            try:
+                from sadtalker_renderer import SadTalkerRenderer
+                self._sadtalker = SadTalkerRenderer(
+                    model_path=os.path.join(self.model_path, "sadtalker"),
+                    device=self.device
+                )
+                # Ideally we lazy load or async load SadTalker as it's heavy
+                # await self._sadtalker.initialize() 
+                logger.info("SadTalker initialized")
+            except Exception as e:
+                logger.warning(f"SadTalker initialization failed: {e}")
+                self._sadtalker = None
+            
             self._initialized = True
+            logger.info("Avatar renderer initialized")
             logger.info("Avatar renderer initialized")
 
         except Exception as e:
@@ -382,6 +530,45 @@ class AvatarRenderer:
                 ))
 
             avatar_image = await self._load_avatar(avatar_config, config)
+
+            # SADTALKER RENDERING PATH
+            # DEBUG: Temporarily disabled SadTalker to debug blank video issue
+            print(f"DEBUG: use_sadtalker={config.use_sadtalker}, _sadtalker={self._sadtalker is not None}")
+            
+            # DEBUG: SadTalker path enabled
+            if config.use_sadtalker and self._sadtalker:
+                logger.info("Using SadTalker engine", emotion=config.emotion)
+                print("DEBUG: Entering SadTalker path")
+                
+                if progress_callback:
+                    await progress_callback(RenderProgress(
+                        current_frame=0, total_frames=100, current_step="SadTalker generation",
+                        progress=0.2, estimated_remaining=60
+                    ))
+
+                # Render video directly
+                video_path = await self._sadtalker.render(
+                    avatar_image=avatar_image,
+                    audio_path=audio_path,
+                    emotion=config.emotion,
+                    expression_scale=config.expression_scale,
+                    head_pose_scale=config.head_pose_scale,
+                    output_path=output_path
+                )
+
+                logger.info("SadTalker render complete", output=video_path)
+                
+                if progress_callback:
+                    await progress_callback(RenderProgress(
+                        current_frame=100, total_frames=100, 
+                        current_step="Complete", progress=1.0, estimated_remaining=0
+                    ))
+                    
+                return video_path
+
+            # WAV2LIP RENDERING PATH (Existing)
+            print("DEBUG: Using Wav2Lip fallback path")
+            logger.info("Using Wav2Lip fallback")
 
             # Step 3: Generate lip sync data
             if progress_callback:

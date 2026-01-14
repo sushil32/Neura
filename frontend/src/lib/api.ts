@@ -255,9 +255,66 @@ export const llmApi = {
     type?: string;
     duration?: number;
     tone?: string;
+    audience?: string;
+    platform?: string;
   }): Promise<ScriptGenerateResponse> => {
     const response = await api.post('/llm/script/generate', data);
     return response.data;
+  },
+
+  generateScriptStream: async (
+    data: {
+      topic: string;
+      type?: string;
+      duration?: number;
+      tone?: string;
+      audience?: string;
+      platform?: string;
+    },
+    onChunk: (chunk: string) => void,
+    onError: (error: any) => void
+  ): Promise<void> => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    try {
+      const response = await fetch(`${API_URL}/api/v1/llm/script/generate/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(data),
+      });
+
+      if (!response.ok) throw new Error('Stream failed');
+      if (!response.body) throw new Error('No body');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') {
+              return;
+            }
+            if (data.startsWith('[ERROR]')) {
+              onError(data);
+              return;
+            }
+            onChunk(data);
+          }
+        }
+      }
+    } catch (err) {
+      onError(err);
+    }
   },
 };
 

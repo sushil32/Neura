@@ -130,9 +130,9 @@ async def test_sadtalker():
             headers=headers,
             json={
                 "quality": "balanced", 
-                "resolution": "720p",
+                "resolution": "1080p",
                 "emotion": "happy",
-                "expression_scale": 1.1,
+                "expression_scale": 1.3,
                 "head_pose_scale": 1.0,
                 "use_sadtalker": True,
                 "voice_id": "james"
@@ -151,7 +151,7 @@ async def test_sadtalker():
         print("\n4️⃣ Waiting for completion...")
         print("   (This might take a minute or two as it loads models)")
         
-        for i in range(120): # Wait up to 4 mins
+        for i in range(300): # Wait up to 10 mins
             await asyncio.sleep(2)
             
             try:

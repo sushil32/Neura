@@ -91,6 +91,7 @@ class VideoGenerateRequest(BaseModel):
     head_pose_scale: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
     use_sadtalker: bool = True  # False = fallback to Wav2Lip
     voice_id: Optional[str] = "default"
+    avatar_id: Optional[str] = None
 
 
 class VideoGenerateResponse(BaseModel):

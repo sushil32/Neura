@@ -57,6 +57,55 @@ class BaseLLMProvider(ABC):
             return False
 
 
+class MockLLMProvider(BaseLLMProvider):
+    """Mock provider for testing."""
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Return a mock chat response."""
+        return {
+            "id": "mock-chat-1",
+            "model": "mock-model",
+            "content": f"[MOCK] Generated script based on: {messages[-1]['content']}\n\n[VISUAL: Opening shot]\nHost: Welcome to this mock video script!",
+            "usage": {"total_tokens": 50},
+        }
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs,
+    ) -> AsyncGenerator[str, None]:
+        """Stream a mock response."""
+        response = f"[MOCK STREAM] Generated script based on input.\n\n[VISUAL: Opening shot]\nHost: Welcome to the future of AI video!\n[PAUSE]\nHost: This is a streamed response from the Mock Provider."
+        words = response.split(" ")
+        import asyncio
+        for word in words:
+            await asyncio.sleep(0.05)  # Simulate typing
+            yield word + " "
+
+    async def complete(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Return mock completion."""
+        return {
+            "id": "mock-cmpl-1",
+            "model": "mock-model",
+            "text": f"[MOCK] Completion for: {prompt}",
+            "usage": {"total_tokens": 20},
+        }
+
+
 class LMStudioProvider(BaseLLMProvider):
     """LM Studio provider for local LLM inference."""
 
@@ -411,6 +460,10 @@ def get_llm_provider() -> BaseLLMProvider:
 
         providers = []
 
+        # Add Mock provider
+        if settings.llm_provider == "mock":
+             providers.append(MockLLMProvider())
+
         # Add Gemini if configured
         if settings.gemini_api_key:
             providers.append(
@@ -429,10 +482,20 @@ def get_llm_provider() -> BaseLLMProvider:
             )
 
         if not providers:
-            raise ValueError("No LLM provider configured")
+            # Fallback to Mock if nothing else works?
+            # Or just raise error. 
+            # Let's add Mock as last resort if dev environment?
+            pass
+
+        if not providers:
+             logger.warning("No LLM providers configured. Using Mock.")
+             _provider = MockLLMProvider()
+             return _provider
 
         # Use primary provider based on environment
-        if settings.llm_provider == "gemini" and settings.gemini_api_key:
+        if settings.llm_provider == "mock":
+             _provider = MockLLMProvider()
+        elif settings.llm_provider == "gemini" and settings.gemini_api_key:
             _provider = FallbackProvider(
                 [p for p in providers if isinstance(p, GeminiProvider)]
                 + [p for p in providers if isinstance(p, LMStudioProvider)]
